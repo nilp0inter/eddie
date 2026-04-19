@@ -31,26 +31,13 @@ import eddie/cmd.{
 import eddie/message.{type Message}
 import eddie/tool.{type ToolDefinition}
 import eddie/widget.{type WidgetHandle}
+import eddie/widgets/task_protocol.{
+  type Task, type TaskStatus, Done, InProgress, Pending, Task,
+}
 
 // ============================================================================
 // Supporting types
 // ============================================================================
-
-pub type TaskStatus {
-  Pending
-  InProgress
-  Done
-}
-
-pub type Task {
-  Task(
-    id: Int,
-    description: String,
-    status: TaskStatus,
-    memories: List(String),
-    ui_expanded: Bool,
-  )
-}
 
 /// One chronological log entry. Exactly one payload variant.
 pub type LogItem {
@@ -74,11 +61,6 @@ pub type ConversationLogModel {
     active_task_id: Option(Int),
     picks_for_next_request: Set(Int),
   )
-}
-
-/// Create an empty tasks dict. Exposed for testing protocol checks.
-pub fn new_empty_tasks() -> Dict(Int, Task) {
-  dict.new()
 }
 
 fn new_model() -> ConversationLogModel {
@@ -243,7 +225,7 @@ fn do_start_task(
             "Task "
             <> int.to_string(task_id)
             <> " cannot be started: status is "
-            <> status_to_string(task.status)
+            <> task_protocol.status_to_string(task.status)
             <> " (only pending tasks can be started)."
           #(model, cmd.for_initiator(initiator:, text:))
         }
@@ -374,7 +356,7 @@ fn update_pick_task(
             "Task "
             <> int.to_string(task_id)
             <> " is not done (status: "
-            <> status_to_string(task.status)
+            <> task_protocol.status_to_string(task.status)
             <> "). Only done tasks can be picked for expansion."
           #(model, cmd.for_initiator(initiator:, text: err))
         }
@@ -577,63 +559,12 @@ pub fn check_protocol(
   tool_name tool_name: String,
   protocol_free_tools protocol_free_tools: Set(String),
 ) -> Option(String) {
-  case tool_name {
-    // Task management tools — always callable
-    "create_task" | "task_pick" | "remove_task" -> None
-    "start_task" ->
-      case model.active_task_id {
-        Some(active_id) ->
-          Some(
-            "Cannot start a task while task "
-            <> int.to_string(active_id)
-            <> " is in_progress. Call close_current_task first.",
-          )
-        None -> None
-      }
-    "close_current_task" -> check_protocol_close(model)
-    "task_memory" ->
-      case model.active_task_id {
-        None ->
-          Some(
-            "Cannot append memory outside a task. Start a task first with start_task(task_id).",
-          )
-        Some(_) -> None
-      }
-    // Any other tool — allowed iff a task is active or tool is protocol-free
-    _ ->
-      case model.active_task_id {
-        Some(_) -> None
-        None ->
-          case set.contains(protocol_free_tools, tool_name) {
-            True -> None
-            False ->
-              Some(
-                "Cannot execute '"
-                <> tool_name
-                <> "' outside a task. Start a task first with start_task(task_id).",
-              )
-          }
-      }
-  }
-}
-
-fn check_protocol_close(model: ConversationLogModel) -> Option(String) {
-  case model.active_task_id {
-    None -> Some("No task is in_progress; nothing to close.")
-    Some(tid) -> {
-      let has_memories =
-        dict.get(model.tasks, tid)
-        |> result.map(fn(task) { task.memories != [] })
-        |> result.unwrap(False)
-      case has_memories {
-        True -> None
-        False ->
-          Some(
-            "Cannot close the current task without at least one memory. Call task_memory(...) first, recording anything you need to remember — once the task is closed you cannot add more.",
-          )
-      }
-    }
-  }
+  task_protocol.check(
+    active_task_id: model.active_task_id,
+    tasks: model.tasks,
+    tool_name: tool_name,
+    protocol_free_tools: protocol_free_tools,
+  )
 }
 
 /// Return the active task id (the task that will own newly arriving log items).
@@ -813,7 +744,7 @@ fn view_tools(model: ConversationLogModel) -> List(ToolDefinition) {
 
 fn view_messages(model: ConversationLogModel) -> List(Message) {
   let protocol_msg =
-    message.Request(parts: [message.SystemPart(task_protocol_rules)])
+    message.Request(parts: [message.SystemPart(task_protocol.rules)])
 
   // Walk log in chronological order (reversed from internal prepend order)
   let log = list.reverse(model.log)
@@ -839,7 +770,7 @@ fn view_messages(model: ConversationLogModel) -> List(Message) {
         ["## Open tasks"]
         |> list.append(
           list.map(open_tasks, fn(task) {
-            status_icon(task.status)
+            task_protocol.status_icon(task.status)
             <> " "
             <> int.to_string(task.id)
             <> ". "
@@ -1304,7 +1235,7 @@ fn from_ui_update_task_status(args: Dynamic) -> Option(ConversationLogMsg) {
   }
   case decode.run(args, decoder) {
     Ok(#(task_id, status_str)) ->
-      case parse_task_status(status_str) {
+      case task_protocol.parse_status(status_str) {
         Ok(status) -> Some(UpdateTaskStatus(task_id:, status:, initiator: UI))
         Error(Nil) -> None
       }
@@ -1469,31 +1400,6 @@ fn execute_log_cmd_loop(
 // Helpers
 // ============================================================================
 
-fn status_to_string(status: TaskStatus) -> String {
-  case status {
-    Pending -> "pending"
-    InProgress -> "in_progress"
-    Done -> "done"
-  }
-}
-
-fn status_icon(status: TaskStatus) -> String {
-  case status {
-    Pending -> "[ ]"
-    InProgress -> "[~]"
-    Done -> "[x]"
-  }
-}
-
-fn parse_task_status(s: String) -> Result(TaskStatus, Nil) {
-  case s {
-    "pending" -> Ok(Pending)
-    "in_progress" -> Ok(InProgress)
-    "done" -> Ok(Done)
-    _ -> Error(Nil)
-  }
-}
-
 fn task_not_found_cmd(
   task_id task_id: Int,
   initiator initiator: Initiator,
@@ -1503,7 +1409,11 @@ fn task_not_found_cmd(
 }
 
 fn task_status_change_text(task_id: Int, status: TaskStatus) -> String {
-  "Task " <> int.to_string(task_id) <> " → " <> status_to_string(status) <> "."
+  "Task "
+  <> int.to_string(task_id)
+  <> " → "
+  <> task_protocol.status_to_string(status)
+  <> "."
 }
 
 fn set_task(
@@ -1549,41 +1459,3 @@ fn decode_ui_int(
     Error(_) -> None
   }
 }
-
-// ============================================================================
-// Task protocol rules (shown to the LLM as a system prompt)
-// ============================================================================
-
-const task_protocol_rules = "## Task Protocol — conversation memory management
-
-Your conversation is partitioned into **tasks**. Every tool call you make (except task management and goal management) must happen while a task is `in_progress`. When you close a task with `close_current_task`, the full span of that task — every tool call, every tool result, every intermediate response — is **replaced** for future prompts by the task's **memories**.
-
-### Lifecycle
-1. `create_task(description)` — plan a unit of work (or reuse a pending one).
-2. `start_task(task_id)` — mark it `in_progress`. Only one task can be `in_progress` at a time.
-3. Do the work — call any tools you need, freely interleaved.
-4. `task_memory(text)` — **call this aggressively** to record anything you will need later: findings, file paths, API shapes, decisions, partial results, dead ends you already explored. Call it multiple times during the task. Memories are **APPEND-ONLY while the task is in_progress** — after close, you cannot add more.
-5. `close_current_task()` — in a response by itself, as the first and only tool call. Requires at least one memory.
-
-### MEMORIES ARE YOUR ONLY DURABLE RECORD
-After `close_current_task`, the task's conversation becomes a collapsed block containing only the memories you saved. The raw tool calls, tool results, and your intermediate thinking are hidden from future prompts. You cannot undo this. **Save memories aggressively** — anything relevant to the overall goal, any non-obvious finding, any decision you made. If you realise later that you need the hidden detail, you can call `task_pick(task_id)` to re-expand the full log for one single request only.
-
-### Rules
-- Every non-task, non-goal tool call must be inside an `in_progress` task. Calls outside are rejected.
-- Only one task `in_progress` at a time. Call `close_current_task` before `start_task` again.
-- `close_current_task` must be the **first and only** tool call in its response. Do not call other tools in the same response. You need to have seen all tool results before closing so your memories are accurate.
-- `close_current_task` is rejected if the task has zero memories — you must record at least one memory before closing.
-- Tasks with status `in_progress` or `done` cannot be removed. They are frozen records.
-- `task_pick(task_id)` expands a done task's full log for the **next request only**, then collapses again.
-
-### Example
-```
-Response 1: create_task({description: 'Audit the auth middleware'})
-            start_task({task_id: 1})
-            open_file({path: 'src/auth/middleware.py'})
-            ← you receive tool results
-Response 2: task_memory({text: 'Middleware at src/auth/middleware.py lines 12-48. Uses jwt.decode() without verifying aud claim.'})
-            task_memory({text: 'Session store is Redis, keys prefixed \"sess:\".'})
-Response 3: close_current_task({})
-```
-Note that `close_current_task` is in a response by itself, after all memories have been saved."

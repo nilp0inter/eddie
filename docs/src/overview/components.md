@@ -40,9 +40,9 @@ After each state mutation (user message added, response recorded, tool calls dis
 
 During tool dispatch, the agent also sends tool call progress notifications as JSON to subscribers. Each tool call sends a `{"type": "tool_call", "name": "...", "args": "..."}` message before dispatch and a `{"type": "tool_result", "name": "...", "result": "..."}` message after dispatch. The browser renders these as collapsible detail blocks in the chat stream, giving visibility into the agent's actions during a turn.
 
-### `eddie/server`
+### `eddie/server` and `eddie/frontend`
 
-Mist HTTP and WebSocket server. Thin glue between the browser and the agent actor.
+Mist HTTP and WebSocket server (`server.gleam`) plus the browser UI template (`frontend.gleam`). The server is thin glue between the browser and the agent actor; the frontend module holds the self-contained HTML page.
 
 - **`ServerConfig(port)`** — listening port configuration
 - **`start(config, agent)`** — starts mist, returns `Result(Started(Supervisor), StartError)`
@@ -76,9 +76,9 @@ Each WebSocket connection is a separate BEAM process. On init, it creates two Su
 | `tool_call` | `{"type": "tool_call", "name": "...", "args": "..."}` | Shows tool call in chat as collapsible block |
 | `tool_result` | `{"type": "tool_result", "name": "...", "result": "..."}` | Shows tool result in chat with distinct styling |
 
-**Inline HTML frontend:**
+**Frontend template (`eddie/frontend`):**
 
-The `index_html()` function returns a self-contained HTML page with embedded CSS and ~150 lines of JavaScript. The layout uses a VS Code-style activity bar (48px icon strip) with a collapsible side panel (320px) and main chat area. Features:
+The `frontend.index_html()` function returns a self-contained HTML page with embedded CSS and ~150 lines of JavaScript. The layout uses a VS Code-style activity bar (48px icon strip) with a collapsible side panel (320px) and main chat area. Features:
 
 - **Activity bar** — icon buttons for each widget (System Prompt, Goal, File Explorer, Tasks, Token Usage) with notification badges for updates to inactive panels
 - **Side panel** — displays one widget at a time, toggled by activity bar clicks
@@ -126,13 +126,13 @@ Identity and framing text for the agent. The simplest widget — holds a single 
 
 The update function is trivial: `SetSystemPrompt` replaces the text, `ResetSystemPrompt` reverts to the default. Both return `CmdNone` since there's no LLM to respond to.
 
-### `eddie/widgets/conversation_log`
+### `eddie/widgets/conversation_log` and `eddie/widgets/task_protocol`
 
-Task-partitioned conversation history with memory management. The most complex widget — manages the full task lifecycle and controls what the LLM sees in its context window.
+Task-partitioned conversation history with memory management. The most complex widget — manages the full task lifecycle and controls what the LLM sees in its context window. The task types and protocol enforcement logic live in a separate `task_protocol` module.
 
 **Core concept:** the conversation is partitioned by **tasks**. A task moves through `Pending → InProgress → Done`. At most one task can be `InProgress` at any time. When a task closes, its full conversation span (tool calls, results, intermediate responses) collapses to just the task description and its **memories** — short LLM-authored summaries recorded during the task. The LLM can request one-shot re-expansion of a done task via `task_pick`.
 
-**Types:**
+**Types (defined in `task_protocol`):**
 
 - `TaskStatus` — `Pending` | `InProgress` | `Done`
 - `Task(id, description, status, memories, ui_expanded)` — memories stored as reversed list (prepend during update, reverse when viewing)
@@ -169,11 +169,11 @@ Task-partitioned conversation history with memory management. The most complex w
 | `task_memory` | A task is in progress |
 | `close_current_task` | A task is in progress AND it has ≥1 memory |
 
-**Task protocol enforcement:**
+**Task protocol enforcement (in `task_protocol`):**
 
-`check_protocol(model, tool_name, protocol_free_tools)` returns `Some(error_message)` if a tool call violates the protocol, `None` if allowed. The Context compositor (Phase 3) will call this before dispatching any tool call. Task management tools (`create_task`, `remove_task`, `task_pick`) are always allowed. All other tools require an active task unless they appear in the `protocol_free_tools` set.
+`task_protocol.check(active_task_id, tasks, tool_name, protocol_free_tools)` returns `Some(error_message)` if a tool call violates the protocol, `None` if allowed. The conversation log delegates to this via `check_protocol`, and the Context compositor (Phase 3) calls it before dispatching any tool call. Task management tools (`create_task`, `remove_task`, `task_pick`) are always allowed. All other tools require an active task unless they appear in the `protocol_free_tools` set.
 
-The task protocol rules are injected as a `SystemPart` at the start of `view_messages`, instructing the LLM on the lifecycle, memory discipline, and constraints.
+The task protocol rules (`task_protocol.rules`) are injected as a `SystemPart` at the start of `view_messages`, instructing the LLM on the lifecycle, memory discipline, and constraints.
 
 **`view_messages` collapsing logic:**
 

@@ -3,7 +3,6 @@ import gleam/dynamic/decode
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
-import gleam/set
 import gleam/string
 import gleeunit/should
 
@@ -306,105 +305,6 @@ pub fn start_non_pending_task_test() {
     Ok(text) -> string.contains(text, "cannot be started") |> should.be_true
     Error(_) -> should.fail()
   }
-}
-
-// ============================================================================
-// check_protocol
-// ============================================================================
-
-pub fn check_protocol_allows_task_management_test() {
-  let model =
-    conversation_log.ConversationLogModel(
-      log: [],
-      tasks: conversation_log.new_empty_tasks(),
-      task_order: [],
-      next_id: 1,
-      active_task_id: None,
-      picks_for_next_request: set.new(),
-    )
-  let free = set.new()
-
-  conversation_log.check_protocol(
-    model: model,
-    tool_name: "create_task",
-    protocol_free_tools: free,
-  )
-  |> should.equal(None)
-
-  conversation_log.check_protocol(
-    model: model,
-    tool_name: "task_pick",
-    protocol_free_tools: free,
-  )
-  |> should.equal(None)
-
-  conversation_log.check_protocol(
-    model: model,
-    tool_name: "remove_task",
-    protocol_free_tools: free,
-  )
-  |> should.equal(None)
-}
-
-pub fn check_protocol_blocks_tool_outside_task_test() {
-  let model =
-    conversation_log.ConversationLogModel(
-      log: [],
-      tasks: conversation_log.new_empty_tasks(),
-      task_order: [],
-      next_id: 1,
-      active_task_id: None,
-      picks_for_next_request: set.new(),
-    )
-  let free = set.new()
-
-  let result =
-    conversation_log.check_protocol(
-      model: model,
-      tool_name: "open_file",
-      protocol_free_tools: free,
-    )
-  result |> should.be_some
-}
-
-pub fn check_protocol_allows_protocol_free_tools_test() {
-  let model =
-    conversation_log.ConversationLogModel(
-      log: [],
-      tasks: conversation_log.new_empty_tasks(),
-      task_order: [],
-      next_id: 1,
-      active_task_id: None,
-      picks_for_next_request: set.new(),
-    )
-  let free = set.from_list(["set_goal"])
-
-  conversation_log.check_protocol(
-    model: model,
-    tool_name: "set_goal",
-    protocol_free_tools: free,
-  )
-  |> should.equal(None)
-}
-
-pub fn check_protocol_allows_tool_inside_task_test() {
-  let model =
-    conversation_log.ConversationLogModel(
-      log: [],
-      tasks: conversation_log.new_empty_tasks(),
-      task_order: [],
-      next_id: 1,
-      active_task_id: Some(1),
-      picks_for_next_request: set.new(),
-    )
-  let free = set.new()
-
-  conversation_log.check_protocol(
-    model: model,
-    tool_name: "open_file",
-    protocol_free_tools: free,
-  )
-  |> should.equal(None)
 }
 
 // ============================================================================

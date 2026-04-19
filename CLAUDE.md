@@ -32,7 +32,8 @@ src/
   eddie/
     agent.gleam        OTP actor: turn loop, subscriber notifications
     agent_tree.gleam   Hierarchical agent management (parent-child)
-    server.gleam       mist HTTP + WebSocket server, inline HTML frontend
+    server.gleam       mist HTTP + WebSocket server
+    frontend.gleam     Browser UI template (HTML/CSS/JS)
     cmd.gleam          Cmd(msg) side-effect descriptors, Initiator type
     message.gleam      MessagePart, Message types, glopenai conversion
     tool.gleam         ToolDefinition type, glopenai conversion
@@ -44,6 +45,7 @@ src/
     widgets/
       system_prompt.gleam    System prompt identity text
       conversation_log.gleam Task-partitioned conversation history
+      task_protocol.gleam    Task types, protocol rules, enforcement
       goal.gleam             Protocol-free goal tracking
       file_explorer.gleam    Filesystem navigation (CmdEffect IO)
       token_usage.gleam      Display-only token tracking
@@ -61,6 +63,7 @@ test/
     goal_test.gleam
     file_explorer_test.gleam
     token_usage_test.gleam
+    task_protocol_test.gleam
 reference/             Read-only reference implementations
   calipso/             Python reference (Elm-architecture widgets)
   glopenai/            Gleam OpenAI client (published on hex.pm)
