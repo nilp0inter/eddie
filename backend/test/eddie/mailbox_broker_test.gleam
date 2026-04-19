@@ -46,8 +46,7 @@ pub fn send_and_read_unread_test() {
       content: "Message 1",
     )
 
-  let unread =
-    mailbox_broker.read_unread(broker: broker, agent_id: "child-1")
+  let unread = mailbox_broker.read_unread(broker: broker, agent_id: "child-1")
   case unread {
     [msg] -> msg.content |> should.equal("Message 1")
     _ -> should.fail()
@@ -87,11 +86,7 @@ pub fn mark_read_test() {
     )
 
   // Mark as read
-  mailbox_broker.mark_read(
-    broker: broker,
-    agent_id: "b",
-    message_id: mail.id,
-  )
+  mailbox_broker.mark_read(broker: broker, agent_id: "b", message_id: mail.id)
   |> should.be_ok
 
   // Should have no unread now

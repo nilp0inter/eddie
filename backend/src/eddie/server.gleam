@@ -240,9 +240,7 @@ fn control_ws_init(
 
   let selector =
     process.new_selector()
-    |> process.select_map(update_subject, fn(payload) {
-      TreeUpdate(payload:)
-    })
+    |> process.select_map(update_subject, fn(payload) { TreeUpdate(payload:) })
 
   // Subscribe to tree change events
   agent_tree.subscribe_tree(tree: tree, subscriber: update_subject)
@@ -308,10 +306,7 @@ fn handle_control_client_message(
         Ok(_) -> Nil
         Error(_) -> {
           let event =
-            protocol.AgentSpawnFailed(
-              id: id,
-              reason: "Failed to create agent",
-            )
+            protocol.AgentSpawnFailed(id: id, reason: "Failed to create agent")
           let payload = protocol.server_events_to_json_string([event])
           let _sent = mist.send_text_frame(conn, payload)
           Nil

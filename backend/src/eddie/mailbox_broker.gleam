@@ -6,8 +6,6 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 
-
-
 import eddie_shared/mailbox.{type MailMessage, MailMessage}
 
 import gleam/erlang/process.{type Subject}
@@ -160,10 +158,8 @@ fn handle_message(
 
     SubscribeMailbox(agent_id, subscriber) -> {
       let subs = dict.get(state.subscribers, agent_id) |> unwrap_list
-      let new_subs = dict.insert(state.subscribers, agent_id, [
-        subscriber,
-        ..subs
-      ])
+      let new_subs =
+        dict.insert(state.subscribers, agent_id, [subscriber, ..subs])
       actor.continue(BrokerState(..state, subscribers: new_subs))
     }
 

@@ -125,7 +125,7 @@ Two-page Lustre application (`frontend/src/eddie_frontend.gleam`) with a landing
 **Conversation page view:**
 
 - **Top bar:** back button, "Eddie" title, agent ID, connection status
-- **Sidebar panels:** Goal, Tasks, Files, Tokens, Subagents (child agents with status icons), Mailbox (inbox with unread markers, outbox)
+- **Sidebar panels:** Goal, Tasks, Files, Tokens, Subagents (child agents with status icons), Mailbox (outbox)
 - **Chat view:** user messages, assistant responses with tool call badges, collapsible tool results, thinking indicator
 - **Input bar:** text input and send button, disabled when agent WS is not connected
 
@@ -161,7 +161,7 @@ OTP actor that manages a forest of rose-tree agent hierarchies. Each agent in th
 - **`set_broker(tree, broker)`** — injects the mailbox broker Subject (called once at startup)
 - **`SpawnError`** — `AgentAlreadyExists(id)` | `ParentNotFound(id)` | `AgentStartFailed(StartError)`
 
-Agents are stored as `Dict(String, AgentEntry)` where `AgentEntry` holds `subject`, `label`, `parent_id`, `child_ids`, and `status`. The tree builds extra widgets (subagent_manager, mailbox) via closures at spawn time to avoid import cycles (see [trade-off card](../decisions/tradeoffs/14-closure-based-widget-injection.md)). The tree does not use OTP supervision — each agent is a standalone actor. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
+Agents are stored as `Dict(String, AgentEntry)` where `AgentEntry` holds `subject`, `label`, `parent_id`, `child_ids`, and `status`. The tree builds extra widgets (subagent_manager, mailbox) via closures at spawn time to avoid import cycles (see [trade-off card](../decisions/tradeoffs/14-closure-based-widget-injection.md)). After spawning each agent, the tree also starts a mail forwarder process that subscribes to the broker and converts incoming mail into user messages (see Mail forwarder section under widgets). The tree does not use OTP supervision — each agent is a standalone actor. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
 
 ### `eddie/mailbox_broker`
 
@@ -175,7 +175,7 @@ Central OTP actor for routing free-form text messages between agents. All agents
 - **`get_outbox(broker, agent_id)`** — returns sent messages
 - **`subscribe_mailbox` / `unsubscribe_mailbox`** — subscribe to new mail notifications for a specific agent
 
-The broker is started once in `eddie.gleam` and injected into the `AgentTree` via `set_broker`. Each agent's mailbox widget communicates with the broker via `CmdEffect` closures.
+The broker is started once in `eddie.gleam` and injected into the `AgentTree` via `set_broker`. Each agent's mailbox widget communicates with the broker via `CmdEffect` closures for sending. Incoming mail delivery uses `subscribe_mailbox` — the agent tree's mail forwarder subscribes to the broker on behalf of each agent and converts `MailMessage` notifications into `agent.send_message` calls (see Mail forwarder section under widgets).
 
 ## Widgets (Phase 2 + Phase 6)
 
@@ -296,27 +296,34 @@ Display-only token tracking. No LLM tools or messages — receives data via `wid
 Gives agents the ability to spawn child agents autonomously. Protocol-free. Uses closure-based `SpawnFn` and `ListChildrenFn` to avoid import cycles with `agent_tree`.
 
 - **Model:** `SubagentManagerModel(agent_id, spawn_fn, list_children_fn, children, next_child_number)` — `children` is `List(SubagentInfo)` tracking spawned children locally
-- **Messages:** `SpawnSubagent(label, goal, initial_message)`, `ListSubagents`, `SpawnResult(result, info)`, `ChildrenListed(children)`
-- **LLM tools:** `spawn_subagent` (label, goal, initial_message — generates UUID, calls spawn closure via `CmdEffect`) and `list_subagents` (queries tree via `CmdEffect`)
-- **Views:** `view_messages` shows a summary of spawned subagents; `view_state` produces `SubagentsUpdated(children)` with `AgentInfo` records
+- **Messages:** `SpawnSubagent(label, goal, initial_message)`, `SpawnResult(result, info)`
+- **LLM tools:** `spawn_subagent` (label, goal, initial_message — generates UUID, calls spawn closure via `CmdEffect`)
+- **Views:** `view_messages` shows a summary of spawned subagents, plus a critical instruction when subagents exist telling the agent it must end its turn to receive replies; `view_state` produces `SubagentsUpdated(children)` with `AgentInfo` records
 - **Factory:** `create(agent_id, spawn_fn, list_children_fn)` — closures are constructed by `agent_tree.build_extra_widgets`
 
-The system prompt for spawned children includes the goal and instructs them to use `send_to_parent` when done.
+The system prompt for spawned children includes the goal and instructs them to use `send_to_parent` when done. The spawn result and tool description both emphasise that the parent must end its turn after spawning — incoming mail is only delivered between turns (see mailbox widget and mail forwarder below).
 
 ### `eddie/widgets/mailbox`
 
-Parent-child communication via free-form messages through the central mailbox broker. Protocol-free. Tools are dynamic based on the agent's position in the tree.
+Parent-child communication via free-form messages through the central mailbox broker. Protocol-free. Send-only — incoming mail is delivered automatically by the mail forwarder (see below).
 
-- **Model:** `MailboxModel(agent_id, parent_id, child_ids, inbox, outbox, broker)` — `broker` is a `Subject(MailboxBrokerMessage)`
-- **Messages:** `SendToParent(content, initiator)`, `SendToChild(child_id, content, initiator)`, `ReadMailbox(initiator)`, `CheckUnread(initiator)`, `SendResult(result)`, `InboxLoaded(messages)`, `UnreadLoaded(messages)`
+- **Model:** `MailboxModel(agent_id, parent_id, list_children_fn, inbox, outbox, broker)` — `broker` is a `Subject(MailboxBrokerMessage)`, `list_children_fn` queries the tree at call time for live child validation
+- **Messages:** `SendToParent(content, initiator)`, `SendToChild(child_id, content, initiator)`, `SendResult(result)`, `ChildrenQueried(children, child_id, content)`
 - **LLM tools (conditional):**
   - Has parent: `send_to_parent(message)`
-  - Has children: `send_to_child(child_id, message)`
-  - Always: `read_mailbox`, `check_unread`
-- **Views:** `view_messages` shows mailbox summary (unread count, parent, children); `view_state` produces `MailboxUpdated(inbox, outbox)`
-- **Factory:** `create(agent_id, parent_id, child_ids, broker)`
+  - Always: `send_to_child(child_id, message)`
+- **Views:** `view_messages` shows mailbox summary (parent info); `view_state` produces `MailboxUpdated(inbox, outbox)`
+- **Factory:** `create(agent_id, parent_id, list_children_fn, broker)`
 
-All broker communication uses `CmdEffect` — the `perform` closure calls `mailbox_broker.send_mail` / `read_mail` / `read_unread` directly (these are `process.call` to the broker actor).
+All broker communication uses `CmdEffect` — the `perform` closure calls `mailbox_broker.send_mail` directly (a `process.call` to the broker actor). The `send_to_child` tool validates the child ID against the live tree via `list_children_fn` before sending.
+
+### Mail forwarder (`agent_tree`)
+
+A lightweight per-agent process spawned by `agent_tree` alongside each agent. It bridges the type gap between `Subject(MailMessage)` (broker notification) and `Subject(AgentMessage)` (agent message queue).
+
+**How it works:** The forwarder creates a `Subject(MailMessage)`, subscribes it to the broker via `subscribe_mailbox`, and loops forever with `process.receive_forever`. When mail arrives, it calls `agent.send_message` with `"[System: New mail from {sender}] {content}"`, which injects the full message as a user message and triggers a new turn.
+
+**Key constraint:** Because `send_message` queues via `pending_user_messages`, the agent only processes incoming mail after its current turn ends. This is why the subagent_manager's prompts instruct the parent to end its turn after spawning — if the parent keeps calling tools, mail delivery is blocked until the turn completes.
 
 ## Structured Output (Phase 5)
 

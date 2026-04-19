@@ -5,10 +5,8 @@
 ///
 /// Tools:
 /// - spawn_subagent: create a child agent with a goal and initial message
-/// - list_subagents: show current children and their statuses
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
-import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -20,7 +18,6 @@ import eddie/coerce
 import eddie/tool.{type ToolDefinition}
 import eddie/widget.{type WidgetHandle}
 import eddie_shared/agent_info.{type AgentInfo}
-
 
 import eddie_shared/message.{type Message}
 import eddie_shared/protocol.{type ServerEvent}
@@ -59,10 +56,8 @@ pub type SubagentInfo {
 pub type SubagentManagerMsg {
   // LLM tools
   SpawnSubagent(label: String, goal: String, initial_message: String)
-  ListSubagents
   // Effect results
   SpawnResult(result: Result(Nil, String), info: SubagentInfo)
-  ChildrenListed(children: List(AgentInfo))
 }
 
 // ============================================================================
@@ -81,38 +76,23 @@ fn update(
         <> label
         <> ". Your goal: "
         <> goal
-        <> "\n\nWork autonomously to achieve this goal. When done, send a message to your parent with your findings using the send_to_parent tool."
+        <> "\n\nWork autonomously to achieve this goal. When done, send your results to your parent using the send_to_parent tool. Your parent will receive the message automatically and does not need to poll for it."
       let info = SubagentInfo(id: child_id, label: label, goal: goal)
       let spawn_fn = model.spawn_fn
       #(
         model,
         cmd.CmdEffect(
           perform: fn() {
-            coerce.unsafe_coerce(
-              SpawnResult(
-                result: spawn_fn(
-                  child_id,
-                  label,
-                  goal,
-                  initial_message,
-                  system_prompt,
-                ),
-                info: info,
+            coerce.unsafe_coerce(SpawnResult(
+              result: spawn_fn(
+                child_id,
+                label,
+                goal,
+                initial_message,
+                system_prompt,
               ),
-            )
-          },
-          to_msg: coerce.unsafe_coerce,
-        ),
-      )
-    }
-
-    ListSubagents -> {
-      let list_fn = model.list_children_fn
-      #(
-        model,
-        cmd.CmdEffect(
-          perform: fn() {
-            coerce.unsafe_coerce(ChildrenListed(children: list_fn()))
+              info: info,
+            ))
           },
           to_msg: coerce.unsafe_coerce,
         ),
@@ -134,25 +114,14 @@ fn update(
               <> info.label
               <> "' (id: "
               <> info.id
-              <> "). It is now running with goal: "
-              <> info.goal,
+              <> "). It is now working on: "
+              <> info.goal
+              <> ". IMPORTANT: You MUST end your turn NOW. Do NOT call any more tools. Do NOT poll, check, or monitor. Just respond with text and stop. You will receive the subagent's reply as a new message automatically, but ONLY after your current turn ends.",
             ),
           )
         }
         Error(err) -> #(model, cmd.CmdToolResult("Error: " <> err))
       }
-    }
-
-    ChildrenListed(children) -> {
-      let text = case children {
-        [] -> "No subagents."
-        _ ->
-          "Subagents ("
-          <> int.to_string(list.length(children))
-          <> "):\n"
-          <> format_children(children, model.children)
-      }
-      #(model, cmd.CmdToolResult(text))
     }
   }
 }
@@ -165,11 +134,15 @@ fn view_messages(model: SubagentManagerModel) -> List(Message) {
   let header = "## Subagents"
   let body = case model.children {
     [] -> "No subagents spawned."
-    children ->
-      list.map(children, fn(c) {
-        "- " <> c.label <> " (" <> c.id <> "): " <> c.goal
-      })
-      |> string.join("\n")
+    children -> {
+      let child_list =
+        list.map(children, fn(c) {
+          "- " <> c.label <> " (" <> c.id <> "): " <> c.goal
+        })
+        |> string.join("\n")
+      child_list
+      <> "\n\nCRITICAL: Subagents are working autonomously. Their replies will be delivered to you as new messages, but ONLY when your turn has ended. If you are waiting for subagent replies, you MUST stop immediately — do not call any tools, do not write anything, just end your turn with a short text response. Any tool call while waiting will BLOCK delivery of their replies."
+    }
   }
   let text = header <> "\n" <> body
   [message.Request(parts: [message.UserPart(text)])]
@@ -179,7 +152,7 @@ fn view_tools(_model: SubagentManagerModel) -> List(ToolDefinition) {
   let assert Ok(spawn_tool) =
     tool.new(
       name: "spawn_subagent",
-      description: "Spawn a new child agent to work on a subtask autonomously. Give it a clear goal and an initial message to start working on.",
+      description: "Spawn a new child agent to work on a subtask autonomously. Give it a clear goal and an initial message to start working on. IMPORTANT: After spawning, you MUST end your turn immediately (respond with text, do NOT call any more tools). You can only receive messages from subagents when your turn has ended. If you keep working (calling tools, writing, polling), their replies will be blocked. Just stop and wait — replies are delivered to you automatically as new messages.",
       parameters_json: json.object([
         #("type", json.string("object")),
         #(
@@ -229,18 +202,7 @@ fn view_tools(_model: SubagentManagerModel) -> List(ToolDefinition) {
       ]),
     )
 
-  let assert Ok(list_tool) =
-    tool.new(
-      name: "list_subagents",
-      description: "List all spawned subagents and their current status.",
-      parameters_json: json.object([
-        #("type", json.string("object")),
-        #("properties", json.object([])),
-        #("additionalProperties", json.bool(False)),
-      ]),
-    )
-
-  [spawn_tool, list_tool]
+  [spawn_tool]
 }
 
 fn view_state(model: SubagentManagerModel) -> List(ServerEvent) {
@@ -286,7 +248,6 @@ fn from_llm(
           )
       }
     }
-    "list_subagents" -> Ok(ListSubagents)
     _ -> Error("SubagentManager: unknown tool '" <> tool_name <> "'")
   }
 }
@@ -297,34 +258,8 @@ fn from_ui(
   _args: Dynamic,
 ) -> Option(SubagentManagerMsg) {
   case event_name {
-    "list_subagents" -> Some(ListSubagents)
     _ -> None
   }
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-fn format_children(
-  agent_infos: List(AgentInfo),
-  local_infos: List(SubagentInfo),
-) -> String {
-  list.map(agent_infos, fn(ai) {
-    let goal = case list.find(local_infos, fn(li) { li.id == ai.id }) {
-      Ok(li) -> li.goal
-      Error(_) -> "(unknown goal)"
-    }
-    "- "
-    <> ai.label
-    <> " ("
-    <> ai.id
-    <> "): "
-    <> agent_info.status_to_string(ai.status)
-    <> " — "
-    <> goal
-  })
-  |> string.join("\n")
 }
 
 // ============================================================================
@@ -337,7 +272,7 @@ pub fn create(
   spawn_fn spawn_fn: SpawnFn,
   list_children_fn list_children_fn: ListChildrenFn,
 ) -> WidgetHandle {
-  let all_tools = ["spawn_subagent", "list_subagents"]
+  let all_tools = ["spawn_subagent"]
   widget.create(widget.WidgetConfig(
     id: "subagent_manager",
     model: SubagentManagerModel(

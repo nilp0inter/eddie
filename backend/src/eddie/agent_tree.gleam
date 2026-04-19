@@ -25,6 +25,7 @@ import eddie/widgets/subagent_manager as eddie_subagent_manager
 import eddie_shared/agent_info.{
   type AgentInfo, type AgentStatus, type AgentTreeNode, AgentInfo, AgentTreeNode,
 }
+import eddie_shared/mailbox.{type MailMessage}
 import eddie_shared/protocol
 
 import gleam/erlang/process.{type Subject}
@@ -134,8 +135,7 @@ fn handle_message(
   msg: AgentTreeMessage,
 ) -> actor.Next(TreeState, AgentTreeMessage) {
   case msg {
-    SetSelf(subject) ->
-      actor.continue(TreeState(..state, self: Some(subject)))
+    SetSelf(subject) -> actor.continue(TreeState(..state, self: Some(subject)))
 
     SetBroker(broker) ->
       actor.continue(TreeState(..state, broker: Some(broker)))
@@ -191,12 +191,13 @@ fn handle_message(
           actor.continue(state)
         }
         False -> {
-          let extra = build_extra_widgets(
-            agent_id: id,
-            parent_id: None,
-            tree_self: state.self,
-            broker: state.broker,
-          )
+          let extra =
+            build_extra_widgets(
+              agent_id: id,
+              parent_id: None,
+              tree_self: state.self,
+              broker: state.broker,
+            )
           let config =
             AgentConfig(
               ..state.base_config,
@@ -204,12 +205,24 @@ fn handle_message(
               system_prompt: system_prompt,
               extra_widgets: extra,
             )
-          case agent.start_with_send_fn(config: config, send_fn: state.send_fn) {
+          case
+            agent.start_with_send_fn(config: config, send_fn: state.send_fn)
+          {
             Error(err) -> {
               process.send(reply_to, Error(AgentStartFailed(err)))
               actor.continue(state)
             }
             Ok(subject) -> {
+              // Subscribe a forwarder so the agent wakes up on new mail
+              case state.broker {
+                Some(broker) ->
+                  start_mail_forwarder(
+                    broker: broker,
+                    agent_id: id,
+                    agent_subject: subject,
+                  )
+                None -> Nil
+              }
               let entry =
                 AgentEntry(
                   subject: subject,
@@ -229,7 +242,15 @@ fn handle_message(
       }
     }
 
-    SpawnChildAgent(id, label, parent_id, _goal, initial_message, override, reply_to) -> {
+    SpawnChildAgent(
+      id,
+      label,
+      parent_id,
+      _goal,
+      initial_message,
+      override,
+      reply_to,
+    ) -> {
       case dict.has_key(state.agents, id) {
         True -> {
           process.send(reply_to, Error(AgentAlreadyExists(id: id)))
@@ -242,12 +263,13 @@ fn handle_message(
               actor.continue(state)
             }
             Ok(parent_entry) -> {
-              let extra = build_extra_widgets(
-                agent_id: id,
-                parent_id: Some(parent_id),
-                tree_self: state.self,
-                broker: state.broker,
-              )
+              let extra =
+                build_extra_widgets(
+                  agent_id: id,
+                  parent_id: Some(parent_id),
+                  tree_self: state.self,
+                  broker: state.broker,
+                )
               let child_config =
                 AgentConfig(
                   ..agent.merge_config(
@@ -268,6 +290,16 @@ fn handle_message(
                   actor.continue(state)
                 }
                 Ok(child_subject) -> {
+                  // Subscribe a forwarder so the agent wakes up on new mail
+                  case state.broker {
+                    Some(broker) ->
+                      start_mail_forwarder(
+                        broker: broker,
+                        agent_id: id,
+                        agent_subject: child_subject,
+                      )
+                    None -> Nil
+                  }
                   let child_entry =
                     AgentEntry(
                       subject: child_subject,
@@ -288,7 +320,10 @@ fn handle_message(
                   let new_state = TreeState(..state, agents: new_agents)
                   process.send(reply_to, Ok(Nil))
                   // Send the initial message to start the child's turn
-                  agent.send_message(subject: child_subject, text: initial_message)
+                  agent.send_message(
+                    subject: child_subject,
+                    text: initial_message,
+                  )
                   broadcast_tree_changed(new_state)
                   actor.continue(new_state)
                 }
@@ -366,8 +401,7 @@ fn build_extra_widgets(
           Ok(_) -> Ok(Nil)
           Error(AgentAlreadyExists(id)) ->
             Error("Agent '" <> id <> "' already exists")
-          Error(ParentNotFound(id)) ->
-            Error("Parent '" <> id <> "' not found")
+          Error(ParentNotFound(id)) -> Error("Parent '" <> id <> "' not found")
           Error(AgentStartFailed(_)) -> Error("Failed to start agent")
         }
       }
@@ -409,6 +443,42 @@ fn build_extra_widgets(
     _, _ -> []
   }
   list.append(subagent_widgets, mailbox_widgets)
+}
+
+// ============================================================================
+// Mail forwarder — wake agent on new mail
+// ============================================================================
+
+/// Spawn a lightweight process that subscribes to the mailbox broker
+/// for this agent and forwards notifications as user messages.
+fn start_mail_forwarder(
+  broker broker: Subject(MailboxBrokerMessage),
+  agent_id agent_id: String,
+  agent_subject agent_subject: Subject(AgentMessage),
+) -> Nil {
+  let _pid =
+    process.spawn(fn() {
+      let mail_subject = process.new_subject()
+      mailbox_broker.subscribe_mailbox(
+        broker: broker,
+        agent_id: agent_id,
+        subscriber: mail_subject,
+      )
+      mail_forward_loop(mail_subject, agent_subject)
+    })
+  Nil
+}
+
+fn mail_forward_loop(
+  mail_subject: Subject(MailMessage),
+  agent_subject: Subject(AgentMessage),
+) -> Nil {
+  let mail = process.receive_forever(from: mail_subject)
+  agent.send_message(
+    subject: agent_subject,
+    text: "[System: New mail from " <> mail.from <> "] " <> mail.content,
+  )
+  mail_forward_loop(mail_subject, agent_subject)
 }
 
 // ============================================================================
@@ -476,9 +546,7 @@ pub fn get_agent(
 }
 
 /// Get the full rose-tree forest of all agents.
-pub fn get_tree(
-  tree tree: Subject(AgentTreeMessage),
-) -> List(AgentTreeNode) {
+pub fn get_tree(tree tree: Subject(AgentTreeMessage)) -> List(AgentTreeNode) {
   process.call(tree, waiting: 5000, sending: fn(reply_to) {
     GetAgentTree(reply_to:)
   })
@@ -527,7 +595,15 @@ pub fn spawn_child(
   override override: AgentConfigOverride,
 ) -> Result(Nil, SpawnError) {
   process.call(tree, waiting: 10_000, sending: fn(reply_to) {
-    SpawnChildAgent(id:, label:, parent_id:, goal:, initial_message:, override:, reply_to:)
+    SpawnChildAgent(
+      id:,
+      label:,
+      parent_id:,
+      goal:,
+      initial_message:,
+      override:,
+      reply_to:,
+    )
   })
 }
 

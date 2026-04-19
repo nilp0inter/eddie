@@ -74,13 +74,10 @@ pub fn agent_info_to_json(info: AgentInfo) -> json.Json {
   json.object([
     #("id", json.string(info.id)),
     #("label", json.string(info.label)),
-    #(
-      "parent_id",
-      case info.parent_id {
-        Some(pid) -> json.string(pid)
-        None -> json.null()
-      },
-    ),
+    #("parent_id", case info.parent_id {
+      Some(pid) -> json.string(pid)
+      None -> json.null()
+    }),
     #("status", status_to_json(info.status)),
   ])
 }
@@ -107,10 +104,7 @@ pub fn status_decoder() -> decode.Decoder(AgentStatus) {
 pub fn agent_info_decoder() -> decode.Decoder(AgentInfo) {
   use id <- decode.field("id", decode.string)
   use label <- decode.field("label", decode.string)
-  use parent_id <- decode.field(
-    "parent_id",
-    decode.optional(decode.string),
-  )
+  use parent_id <- decode.field("parent_id", decode.optional(decode.string))
   use status <- decode.field("status", status_decoder())
   decode.success(AgentInfo(id:, label:, parent_id:, status:))
 }

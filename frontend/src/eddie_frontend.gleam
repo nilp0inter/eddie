@@ -329,7 +329,11 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
 
     AgentCheckConnection(gen) ->
-      case gen == model.agent_ws_generation, model.agent_connection, model.page {
+      case
+        gen == model.agent_ws_generation,
+        model.agent_connection,
+        model.page
+      {
         False, _, _ -> #(model, effect.none())
         _, Connected, _ -> #(model, effect.none())
         True, _, AgentConversationPage(agent_id) -> #(
@@ -700,8 +704,7 @@ fn view_agent_card(node: AgentTreeNode) -> Element(Msg) {
       html.div([attribute.class("agent-card-id")], [html.text(info.id)]),
       case child_text {
         "" -> html.text("")
-        t ->
-          html.div([attribute.class("agent-card-children")], [html.text(t)])
+        t -> html.div([attribute.class("agent-card-children")], [html.text(t)])
       },
       case node.children {
         [] -> html.text("")
@@ -762,10 +765,9 @@ fn view_conversation_top_bar(model: Model) -> Element(Msg) {
     Disconnected -> "Disconnected"
   }
   html.header([attribute.class("top-bar")], [
-    html.button(
-      [attribute.class("back-btn"), event.on_click(NavigateToList)],
-      [html.text("< Back")],
-    ),
+    html.button([attribute.class("back-btn"), event.on_click(NavigateToList)], [
+      html.text("< Back"),
+    ]),
     html.h1([], [html.text("Eddie")]),
     html.span([attribute.class("agent-id-label")], [html.text(agent_id)]),
     html.span([attribute.class("status " <> status_class)], [
@@ -964,7 +966,9 @@ fn view_mailbox_panel(state: AgentState) -> Element(Msg) {
               }
               html.li([attribute.class("task-item " <> read_class)], [
                 html.span([], [
-                  html.text("From " <> m.from <> ": " <> truncate(m.content, 80)),
+                  html.text(
+                    "From " <> m.from <> ": " <> truncate(m.content, 80),
+                  ),
                 ]),
               ])
             }),

@@ -10,7 +10,9 @@ import gleam/dynamic/decode
 import gleam/json
 import gleam/option.{type Option, None, Some}
 
-import eddie_shared/agent_info.{type AgentInfo, type AgentStatus, type AgentTreeNode}
+import eddie_shared/agent_info.{
+  type AgentInfo, type AgentStatus, type AgentTreeNode,
+}
 import eddie_shared/mailbox.{type MailMessage}
 import eddie_shared/message.{type Message}
 import eddie_shared/task.{type TaskStatus}
@@ -495,8 +497,7 @@ pub fn client_command_to_json(command: ClientCommand) -> json.Json {
         #("type", json.string("close_read_file")),
         #("path", json.string(path)),
       ])
-    SpawnRootAgent ->
-      json.object([#("type", json.string("spawn_root_agent"))])
+    SpawnRootAgent -> json.object([#("type", json.string("spawn_root_agent"))])
   }
 }
 
