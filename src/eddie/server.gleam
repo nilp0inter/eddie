@@ -459,16 +459,42 @@ fn index_html() -> String {
       }
     }
 
+    let connectTimeout;
+
     function connect() {
+      // Clean up any previous connection stuck in CONNECTING state
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
+      }
+      clearTimeout(connectTimeout);
+
+      statusEl.textContent = 'Connecting...';
+      statusEl.style.color = '#6c7086';
+
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(protocol + '//' + location.host + '/ws');
 
+      // If the connection doesn't open within 5s, force-close and retry
+      connectTimeout = setTimeout(() => {
+        if (ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+        }
+      }, 5000);
+
       ws.onopen = () => {
+        clearTimeout(connectTimeout);
         statusEl.textContent = 'Connected';
         statusEl.style.color = '#a6e3a1';
       };
 
       ws.onclose = () => {
+        clearTimeout(connectTimeout);
         statusEl.textContent = 'Disconnected \\u2014 reconnecting...';
         statusEl.style.color = '#f38ba8';
         setTimeout(connect, 2000);
