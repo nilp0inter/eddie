@@ -908,10 +908,10 @@ fn log_item_task_id(item: LogItem) -> Option(Int) {
 fn view_state(model: ConversationLogModel) -> List(ServerEvent) {
   let task_ids = list.reverse(model.task_order)
   let task_events =
-    list.filter_map(task_ids, fn(tid) {
+    list.flat_map(task_ids, fn(tid) {
       case dict.get(model.tasks, tid) {
-        Ok(task) -> Ok(task_to_snapshot_event(task))
-        Error(_) -> Error(Nil)
+        Ok(task) -> task_to_snapshot_events(task)
+        Error(_) -> []
       }
     })
 
@@ -922,8 +922,19 @@ fn view_state(model: ConversationLogModel) -> List(ServerEvent) {
   list.append(task_events, log_events)
 }
 
-fn task_to_snapshot_event(task: Task) -> ServerEvent {
-  protocol.TaskCreated(id: task.id, description: task.description)
+fn task_to_snapshot_events(task: Task) -> List(ServerEvent) {
+  let create = [
+    protocol.TaskCreated(id: task.id, description: task.description),
+  ]
+  let status = case task.status {
+    task.Pending -> []
+    _ -> [protocol.TaskStatusChanged(id: task.id, status: task.status)]
+  }
+  let memories =
+    list.map(task.memories, fn(m) {
+      protocol.TaskMemoryAdded(id: task.id, text: m)
+    })
+  list.flatten([create, status, memories])
 }
 
 fn log_item_to_snapshot_event(item: LogItem) -> ServerEvent {

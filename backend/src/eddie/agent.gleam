@@ -105,6 +105,8 @@ type EffectContinuation {
     tool_call_id: String,
     owner_id: String,
     resume: fn(Dynamic) -> widget.DispatchResult,
+    /// Type-erased to_msg for re-applying effect results to the current handle.
+    to_msg: fn(Dynamic) -> Dynamic,
   )
 }
 
@@ -387,11 +389,27 @@ fn handle_tool_effect_result(
           ..state,
           pending_effects: dict.delete(state.pending_effects, call_id),
         )
+      // Apply the effect result to the CURRENT widget handle from context,
+      // not the stale model captured in the resume closure. This prevents
+      // concurrent effects for the same widget from overwriting each other.
+      let dispatch_result = case
+        context.get_widget(
+          context: state.context,
+          owner_id: continuation.owner_id,
+        )
+      {
+        Ok(current_handle) -> {
+          let msg = { continuation.to_msg }(data)
+          widget.apply_msg(handle: current_handle, msg: msg)
+        }
+        // Fallback to stale resume if widget not found (shouldn't happen)
+        Error(Nil) -> { continuation.resume }(data)
+      }
       resolve_effect_result(
         state: state,
         call_id: call_id,
         continuation: continuation,
-        dispatch_result: { continuation.resume }(data),
+        dispatch_result: dispatch_result,
       )
     }
   }
@@ -411,6 +429,7 @@ fn resolve_effect_result(
         Error(err) -> err
       }
 
+      let old_ctx = state.context
       let new_ctx =
         context.replace_widget(
           context: state.context,
@@ -418,6 +437,9 @@ fn resolve_effect_result(
           handle: handle,
         )
       let state = AgentState(..state, context: new_ctx)
+
+      // Notify about widget state changes from effect completion
+      notify_subscribers(state: state, old_context: old_ctx)
 
       notify_tool_result(
         state: state,
@@ -439,14 +461,15 @@ fn resolve_effect_result(
       |> maybe_continue_after_effects
     }
 
-    widget.EffectPending(handle, perform, resume) -> {
+    widget.EffectPending(handle, perform, resume, to_msg) -> {
       let new_ctx =
         context.replace_widget(
           context: state.context,
           owner_id: continuation.owner_id,
           handle: handle,
         )
-      let new_continuation = EffectContinuation(..continuation, resume: resume)
+      let new_continuation =
+        EffectContinuation(..continuation, resume: resume, to_msg: to_msg)
       let state =
         AgentState(
           ..state,
@@ -552,6 +575,7 @@ fn dispatch_tool_calls(
   state: AgentState,
   tool_calls: List(ToolCall),
 ) -> AgentState {
+  let pre_dispatch_ctx = state.context
   let state = AgentState(..state, collected_tool_parts: [])
 
   let state =
@@ -600,6 +624,7 @@ fn dispatch_tool_calls(
           owner_id,
           perform,
           resume,
+          to_msg,
         ) -> {
           let continuation =
             EffectContinuation(
@@ -607,6 +632,7 @@ fn dispatch_tool_calls(
               tool_call_id: tc.tool_call_id,
               owner_id: owner_id,
               resume: resume,
+              to_msg: to_msg,
             )
           let new_state =
             AgentState(
@@ -624,8 +650,8 @@ fn dispatch_tool_calls(
       }
     })
 
-  // Notify subscribers of state changes from tool dispatch
-  // (uses the pre-dispatch context for diffing)
+  // Notify subscribers of widget state changes from tool dispatch
+  notify_subscribers(state: state, old_context: pre_dispatch_ctx)
   maybe_continue_after_effects(state)
 }
 

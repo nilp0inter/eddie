@@ -36,6 +36,7 @@ pub type ToolDispatchResult {
     owner_id: String,
     perform: fn() -> Dynamic,
     resume: fn(Dynamic) -> widget.DispatchResult,
+    to_msg: fn(Dynamic) -> Dynamic,
   )
 }
 
@@ -258,6 +259,19 @@ pub fn children(context context: Context) -> List(WidgetHandle) {
 /// Get the typed conversation log.
 pub fn log(context context: Context) -> ConversationLog {
   context.log
+}
+
+/// Get a widget handle from the context by owner_id.
+/// Returns Error(Nil) if no widget with the given id is found.
+pub fn get_widget(
+  context context: Context,
+  owner_id owner_id: String,
+) -> Result(WidgetHandle, Nil) {
+  case widget.id(context.system_prompt) == owner_id {
+    True -> Ok(context.system_prompt)
+    False ->
+      list.find(context.children, fn(child) { widget.id(child) == owner_id })
+  }
 }
 
 /// Replace a widget handle in the context by owner_id.
@@ -492,7 +506,7 @@ fn wrap_dispatch_result(
   case dispatch_result {
     widget.Completed(_handle, result) ->
       ToolCompleted(context: ctx, result: result)
-    widget.EffectPending(_handle, perform, resume) ->
+    widget.EffectPending(_handle, perform, resume, to_msg) ->
       ToolEffectPending(
         context: ctx,
         tool_name: tool_name,
@@ -500,6 +514,7 @@ fn wrap_dispatch_result(
         owner_id: owner_id,
         perform: perform,
         resume: resume,
+        to_msg: to_msg,
       )
   }
 }

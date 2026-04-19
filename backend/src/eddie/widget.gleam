@@ -32,6 +32,9 @@ pub type DispatchResult {
     handle: WidgetHandle,
     perform: fn() -> Dynamic,
     resume: fn(Dynamic) -> DispatchResult,
+    /// Type-erased to_msg function for re-applying effect results to a
+    /// fresh handle (avoids stale-model bugs with concurrent effects).
+    to_msg: fn(Dynamic) -> Dynamic,
   )
 }
 
@@ -43,7 +46,7 @@ pub fn resolve(
 ) -> #(WidgetHandle, Result(String, String)) {
   case dispatch_result {
     Completed(handle, result) -> #(handle, result)
-    EffectPending(_handle, perform, resume) -> {
+    EffectPending(_handle, perform, resume, _to_msg) -> {
       let data = perform()
       resolve(dispatch_result: resume(data))
     }
@@ -56,7 +59,7 @@ pub fn dispatch_result_handle(
 ) -> WidgetHandle {
   case dispatch_result {
     Completed(handle, _) -> handle
-    EffectPending(handle, _, _) -> handle
+    EffectPending(handle, ..) -> handle
   }
 }
 
@@ -97,6 +100,7 @@ pub opaque type WidgetHandle {
     dispatch_llm_fn: fn(String, Dynamic) -> DispatchResult,
     dispatch_ui_fn: fn(String, Dynamic) -> #(WidgetHandle, Option(String)),
     send_fn: fn(Dynamic) -> Result(WidgetHandle, SendError),
+    apply_msg_fn: fn(Dynamic) -> DispatchResult,
     frontend_tool_names: Set(String),
     protocol_free_tool_names: Set(String),
   )
@@ -167,6 +171,17 @@ pub fn send(
   { handle.send_fn }(msg)
 }
 
+/// Apply a Dynamic message to the widget and return a DispatchResult.
+/// Like send but handles all Cmd variants (including CmdEffect).
+/// Used to re-apply effect results to the current widget handle,
+/// avoiding stale-model bugs with concurrent effects.
+pub fn apply_msg(
+  handle handle: WidgetHandle,
+  msg msg: Dynamic,
+) -> DispatchResult {
+  { handle.apply_msg_fn }(msg)
+}
+
 // ============================================================================
 // Internal: bundled function table to reduce parameter passing
 // ============================================================================
@@ -228,6 +243,9 @@ fn build_handle(
     },
     send_fn: fn(dynamic_msg) {
       do_send(fns: fns, model: model, dynamic_msg: dynamic_msg)
+    },
+    apply_msg_fn: fn(dynamic_msg) {
+      do_apply_msg(fns: fns, model: model, dynamic_msg: dynamic_msg)
     },
     frontend_tool_names: fns.frontend_tools,
     protocol_free_tool_names: fns.protocol_free_tools,
@@ -317,6 +335,18 @@ fn do_send(
   }
 }
 
+/// Apply a Dynamic message directly to a widget, running through update
+/// and the Cmd loop. Like send but handles all Cmd variants.
+fn do_apply_msg(
+  fns fns: WidgetFns(model, msg),
+  model model: model,
+  dynamic_msg dynamic_msg: Dynamic,
+) -> DispatchResult {
+  let msg: msg = coerce.unsafe_coerce(dynamic_msg)
+  let #(new_model, cmd) = { fns.update }(model, msg)
+  execute_cmd_loop(fns: fns, model: new_model, cmd: cmd)
+}
+
 /// Execute the Cmd loop: CmdNone returns Completed with empty result,
 /// CmdToolResult returns Completed with text, CmdEffect returns
 /// EffectPending with the perform thunk and a resume continuation.
@@ -339,6 +369,7 @@ fn execute_cmd_loop(
           let #(new_model, next_cmd) = { fns.update }(model, msg)
           execute_cmd_loop(fns: fns, model: new_model, cmd: next_cmd)
         },
+        to_msg: fn(data) { coerce.unsafe_coerce(to_msg(data)) },
       )
   }
 }

@@ -40,7 +40,7 @@ The agent reacts to messages based on its current data rather than following a s
 
 - `llm_in_flight: Bool` — whether an LLM HTTP request is in flight
 - `pending_user_messages: List(#(String, Option(Subject(TurnResult))))` — queued user messages with optional reply Subjects
-- `pending_effects: Dict(String, EffectContinuation)` — in-flight tool effects keyed by call ID, each holding tool metadata and a `resume` closure
+- `pending_effects: Dict(String, EffectContinuation)` — in-flight tool effects keyed by call ID, each holding tool metadata, a `resume` closure, and a type-erased `to_msg` function
 - `collected_tool_parts: List(MessagePart)` — tool results collected during a dispatch round, recorded as a single message when all effects complete
 - `current_reply_to: Option(Subject(TurnResult))` — the reply Subject for the current turn's caller
 - `iteration: Int` — current turn iteration (reset to 0 for each user message)
@@ -53,7 +53,9 @@ After each state mutation (user message added, response recorded, tool calls dis
 
 `changed_state` uses delta detection: for each widget, it compares the old and new `view_state` output using structural equality. If a widget's state changed and the old events are a prefix of the new events (append-only widgets like the conversation log), only the newly appended tail is returned — avoiding re-sending the full conversation history on every mutation. For replacement-style widgets (like the goal or system prompt), the full new events are returned when they differ.
 
-During tool dispatch, the agent sends `ToolCallStarted` and `ToolCallCompleted` `ServerEvent`s to subscribers, giving visibility into the agent's actions during a turn. `TurnStarted` and `TurnCompleted` are also broadcast through the subscriber mechanism. All notifications use the same JSON-encoded `ServerEvent` list format defined in `eddie_shared/protocol`.
+The agent captures the pre-dispatch context before the tool call fold and notifies subscribers after all synchronous tool dispatches complete — this ensures widget state changes (e.g. `GoalUpdated`, `TaskCreated`) are broadcast immediately rather than being lost in the diff. `ToolCallStarted` and `ToolCallCompleted` events are sent individually during dispatch. `TurnStarted` and `TurnCompleted` are also broadcast through the subscriber mechanism. All notifications use the same JSON-encoded `ServerEvent` list format defined in `eddie_shared/protocol`.
+
+For async effects, the agent applies the effect result to the **current** widget handle from the context (retrieved via `context.get_widget`) using `widget.apply_msg`, rather than using the stale model captured in the resume closure. This prevents concurrent effects for the same widget from overwriting each other's state changes.
 
 ### `eddie/server`
 
@@ -251,7 +253,7 @@ Log items are walked in chronological order, grouped by consecutive `owning_task
 
 An "Open tasks" block listing pending and in-progress tasks is appended at the end.
 
-**`view_state`** produces `TaskCreated` events for each task and `ConversationAppended` events for each log item (as `LogItemSnapshot` variants: `UserMessageSnapshot`, `ResponseSnapshot`, `ToolResultsSnapshot`).
+**`view_state`** produces the full state for each task — `TaskCreated` followed by `TaskStatusChanged` (if not Pending) and `TaskMemoryAdded` events (one per memory) — plus `ConversationAppended` events for each log item (as `LogItemSnapshot` variants: `UserMessageSnapshot`, `ResponseSnapshot`, `ToolResultsSnapshot`). This ensures `changed_state` detects task status and memory changes, and that initial state snapshots carry the complete task state. The frontend handles `TaskCreated` as an upsert (reset if exists, create if new) to support full state re-sends from the diff mechanism.
 
 **Factory:** `create()` — returns a `WidgetHandle` with an empty model. For Context's use, `init()` returns a typed `ConversationLog` opaque type with direct dispatch, protocol checking, and owning task ID access (see [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md)).
 
@@ -365,7 +367,8 @@ The root compositor — the glue between widgets and the agent loop. Holds a sys
 - **`view_tools`** — collects tool definitions from all widgets
 - **`add_user_message` / `add_response` / `add_tool_results`** — record items in the conversation log, tagged with the current owning task ID
 - **`consume_picks`** — clears one-shot task expansions after a request/response round-trip
-- **`handle_tool_call(context, tool_name, args, tool_call_id)`** — enforces the task protocol via `conversation_log.protocol_check`, then routes to the owning widget. Returns `ToolDispatchResult`: either `ToolCompleted(context, result)` or `ToolEffectPending(context, tool_name, tool_call_id, owner_id, perform, resume)`
+- **`handle_tool_call(context, tool_name, args, tool_call_id)`** — enforces the task protocol via `conversation_log.protocol_check`, then routes to the owning widget. Returns `ToolDispatchResult`: either `ToolCompleted(context, result)` or `ToolEffectPending(context, tool_name, tool_call_id, owner_id, perform, resume, to_msg)`
+- **`get_widget(context, owner_id)`** — retrieves a widget handle by owner ID. Returns `Result(WidgetHandle, Nil)`. Used by the agent to get the current handle when resuming async effects
 - **`replace_widget(context, owner_id, handle)`** — replaces a widget handle by owner ID. Used by the agent to insert updated handles after async effects complete
 - **`handle_widget_event`** — dispatches browser UI events to all widgets (no protocol enforcement)
 - **`current_state(context)`** — returns the current state events for all widgets as a flat `List(ServerEvent)` (used for initial WebSocket connect)
@@ -443,15 +446,16 @@ The central abstraction. Defines both the typed configuration and the type-erase
 - `dispatch_llm(handle, tool_name, args)` — runs from_llm -> update -> Cmd loop, returns `DispatchResult`
 - `dispatch_ui(handle, event_name, args)` — checks frontend_tools, runs from_ui -> update -> Cmd loop (resolves effects synchronously)
 - `send(handle, msg)` — direct dispatch, must produce CmdNone
+- `apply_msg(handle, msg)` — applies a Dynamic message through update -> Cmd loop, returns `DispatchResult`. Like `send` but handles all Cmd variants including `CmdEffect`. Used by the agent to re-apply effect results to the current widget handle, avoiding stale-model bugs with concurrent effects
 - `view_messages`, `view_tools`, `view_state` — produce widget output
 - `resolve(dispatch_result)` — runs a `DispatchResult` to completion synchronously (used by `dispatch_ui` and tests)
 - `dispatch_result_handle(dispatch_result)` — extracts the handle from either `Completed` or `EffectPending`
 
 **`DispatchResult`** — the return type of `dispatch_llm`:
 - `Completed(handle, result)` — the tool call finished; `result` is `Ok(text)` or `Error(message)`
-- `EffectPending(handle, perform, resume)` — a `CmdEffect` needs to run asynchronously; `perform` is the effect thunk, `resume` is a continuation that accepts the effect's result and returns the next `DispatchResult`
+- `EffectPending(handle, perform, resume, to_msg)` — a `CmdEffect` needs to run asynchronously; `perform` is the effect thunk, `resume` is a continuation that accepts the effect's result and returns the next `DispatchResult`, `to_msg` is a type-erased `fn(Dynamic) -> Dynamic` that converts the raw effect result into a widget message
 
-When the agent dispatches an LLM tool call, the widget's Cmd loop yields `EffectPending` for `CmdEffect` commands instead of running them inline. The agent spawns a process for the effect and stores the `resume` continuation. When the effect completes, the agent calls `resume(data)` to continue the Cmd loop. For UI events (`dispatch_ui`), effects are resolved synchronously via `resolve`.
+When the agent dispatches an LLM tool call, the widget's Cmd loop yields `EffectPending` for `CmdEffect` commands instead of running them inline. The agent spawns a process for the effect and stores `to_msg` in the `EffectContinuation`. When the effect completes, the agent retrieves the **current** widget handle from the context via `context.get_widget` and applies the effect result using `widget.apply_msg(current_handle, to_msg(data))`. This ensures the effect result is applied to the latest widget state rather than the stale model captured in the `resume` closure — critical when multiple effects for the same widget are in flight concurrently (e.g. multiple `spawn_subagent` calls). For UI events (`dispatch_ui`), effects are resolved synchronously via `resolve`.
 
 ### `eddie/coerce`
 

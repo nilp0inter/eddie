@@ -498,7 +498,21 @@ fn apply_server_event(state: AgentState, event: ServerEvent) -> AgentState {
           memories: [],
           ui_expanded: False,
         )
-      AgentState(..state, tasks: list.append(state.tasks, [snapshot]))
+      // Upsert: reset if exists (handles full state re-sends), create if new
+      case list.any(state.tasks, fn(t) { t.id == id }) {
+        True ->
+          AgentState(
+            ..state,
+            tasks: list.map(state.tasks, fn(t) {
+              case t.id == id {
+                True -> snapshot
+                False -> t
+              }
+            }),
+          )
+        False ->
+          AgentState(..state, tasks: list.append(state.tasks, [snapshot]))
+      }
     }
 
     protocol.TaskStatusChanged(id:, status:) ->
