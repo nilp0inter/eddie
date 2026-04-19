@@ -2,10 +2,13 @@
 ///
 /// Single-module Lustre application that connects to the backend via
 /// WebSocket and renders a chat UI with sidebar panels.
+/// Supports multiple agents — each agent has its own WebSocket connection
+/// and cached state. The user switches between agents via a tab bar.
 import eddie_shared/message
 import eddie_shared/protocol.{
-  type ClientCommand, type DirectorySnapshot, type FileSnapshot,
+  type AgentInfo, type ClientCommand, type DirectorySnapshot, type FileSnapshot,
   type LogItemSnapshot, type ServerEvent, type TaskSnapshot, type TokenRecord,
+  AgentInfo,
 }
 import eddie_shared/task
 import gleam/dict.{type Dict}
@@ -33,6 +36,9 @@ fn ffi_set_timeout(callback: fn() -> Nil, delay_ms: Int) -> Nil
 @external(javascript, "./eddie_frontend_ffi.mjs", "scroll_to_bottom")
 fn ffi_scroll_to_bottom(element_id: String) -> Nil
 
+@external(javascript, "./eddie_frontend_ffi.mjs", "fetch_json")
+fn ffi_fetch_json(url: String, callback: fn(String) -> Nil) -> Nil
+
 // ============================================================================
 // Model
 // ============================================================================
@@ -50,10 +56,9 @@ type Panel {
   TokensPanel
 }
 
-type Model {
-  Model(
-    ws: Option(ws.WebSocket),
-    connection: ConnectionStatus,
+/// Per-agent cached state.
+type AgentState {
+  AgentState(
     goal: Option(String),
     system_prompt: String,
     tasks: List(TaskSnapshot),
@@ -61,17 +66,13 @@ type Model {
     directories: List(DirectorySnapshot),
     files: List(FileSnapshot),
     token_records: List(TokenRecord),
-    chat_input: String,
     thinking: Bool,
     active_tool_calls: Dict(String, String),
-    active_panel: Option(Panel),
   )
 }
 
-fn empty_model() -> Model {
-  Model(
-    ws: None,
-    connection: Connecting,
+fn empty_agent_state() -> AgentState {
+  AgentState(
     goal: None,
     system_prompt: "",
     tasks: [],
@@ -79,11 +80,59 @@ fn empty_model() -> Model {
     directories: [],
     files: [],
     token_records: [],
-    chat_input: "",
     thinking: False,
     active_tool_calls: dict.new(),
-    active_panel: None,
   )
+}
+
+/// State for the inline spawn-agent form.
+type SpawnForm {
+  SpawnForm(id: String, label: String, system_prompt: String)
+}
+
+fn empty_spawn_form() -> SpawnForm {
+  SpawnForm(id: "", label: "", system_prompt: "")
+}
+
+type Model {
+  Model(
+    ws: Option(ws.WebSocket),
+    connection: ConnectionStatus,
+    active_agent: String,
+    agent_list: List(AgentInfo),
+    agents: Dict(String, AgentState),
+    chat_input: String,
+    active_panel: Option(Panel),
+    show_spawn_form: Bool,
+    spawn_form: SpawnForm,
+  )
+}
+
+fn empty_model() -> Model {
+  Model(
+    ws: None,
+    connection: Connecting,
+    active_agent: "root",
+    agent_list: [AgentInfo(id: "root", label: "Root")],
+    agents: dict.from_list([#("root", empty_agent_state())]),
+    chat_input: "",
+    active_panel: None,
+    show_spawn_form: False,
+    spawn_form: empty_spawn_form(),
+  )
+}
+
+/// Get the active agent's state (never fails — empty state as fallback).
+fn active_state(model: Model) -> AgentState {
+  case dict.get(model.agents, model.active_agent) {
+    Ok(state) -> state
+    Error(_) -> empty_agent_state()
+  }
+}
+
+/// Update the active agent's state in the model.
+fn set_active_state(model: Model, state: AgentState) -> Model {
+  Model(..model, agents: dict.insert(model.agents, model.active_agent, state))
 }
 
 // ============================================================================
@@ -96,6 +145,13 @@ type Msg {
   SubmitMessage
   SetActivePanel(Option(Panel))
   AttemptReconnect
+  SwitchAgent(String)
+  AgentListReceived(String)
+  ToggleSpawnForm
+  UpdateSpawnId(String)
+  UpdateSpawnLabel(String)
+  UpdateSpawnPrompt(String)
+  SubmitSpawn
 }
 
 // ============================================================================
@@ -103,7 +159,13 @@ type Msg {
 // ============================================================================
 
 fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
-  #(empty_model(), ws.init("/ws", WsEvent))
+  #(
+    empty_model(),
+    effect.batch([
+      ws.init("/ws/root", WsEvent),
+      fetch_agent_list(),
+    ]),
+  )
 }
 
 // ============================================================================
@@ -119,7 +181,11 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
     WsEvent(ws.OnTextMessage(text)) -> {
       let events = parse_server_events(text)
-      let new_model = list.fold(events, model, apply_server_event)
+      let agent_state = active_state(model)
+      let new_agent_state = list.fold(events, agent_state, apply_server_event)
+      let new_model =
+        set_active_state(model, new_agent_state)
+        |> apply_model_events(events)
       let scroll = scroll_chat_effect()
       #(new_model, scroll)
     }
@@ -127,7 +193,7 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     WsEvent(ws.OnBinaryMessage(_)) -> #(model, effect.none())
 
     WsEvent(ws.OnClose(_)) -> #(
-      Model(..model, ws: None, connection: Disconnected, thinking: False),
+      Model(..model, ws: None, connection: Disconnected),
       delay_effect(AttemptReconnect, 2000),
     )
 
@@ -138,7 +204,7 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
     AttemptReconnect -> #(
       Model(..model, connection: Connecting),
-      ws.init("/ws", WsEvent),
+      ws.init("/ws/" <> model.active_agent, WsEvent),
     )
 
     UpdateInput(text) -> #(Model(..model, chat_input: text), effect.none())
@@ -162,6 +228,93 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
       #(Model(..model, active_panel: new_panel), effect.none())
     }
+
+    SwitchAgent(agent_id) -> {
+      case agent_id == model.active_agent {
+        True -> #(model, effect.none())
+        False -> {
+          // Close current WebSocket, open new one for the selected agent
+          let close_effect = case model.ws {
+            Some(socket) -> ws.close(socket)
+            None -> effect.none()
+          }
+          let new_model =
+            Model(
+              ..model,
+              active_agent: agent_id,
+              ws: None,
+              connection: Connecting,
+            )
+          #(
+            new_model,
+            effect.batch([
+              close_effect,
+              ws.init("/ws/" <> agent_id, WsEvent),
+            ]),
+          )
+        }
+      }
+    }
+
+    AgentListReceived(text) -> {
+      case json.parse(text, decode.list(protocol.agent_info_decoder())) {
+        Ok(agents) -> #(Model(..model, agent_list: agents), effect.none())
+        Error(_) -> #(model, effect.none())
+      }
+    }
+
+    ToggleSpawnForm -> #(
+      Model(
+        ..model,
+        show_spawn_form: !model.show_spawn_form,
+        spawn_form: empty_spawn_form(),
+      ),
+      effect.none(),
+    )
+
+    UpdateSpawnId(value) -> #(
+      Model(..model, spawn_form: SpawnForm(..model.spawn_form, id: value)),
+      effect.none(),
+    )
+
+    UpdateSpawnLabel(value) -> #(
+      Model(..model, spawn_form: SpawnForm(..model.spawn_form, label: value)),
+      effect.none(),
+    )
+
+    UpdateSpawnPrompt(value) -> #(
+      Model(
+        ..model,
+        spawn_form: SpawnForm(..model.spawn_form, system_prompt: value),
+      ),
+      effect.none(),
+    )
+
+    SubmitSpawn -> {
+      let form = model.spawn_form
+      let id = string.trim(form.id)
+      let label = string.trim(form.label)
+      case id, label, model.ws {
+        "", _, _ -> #(model, effect.none())
+        _, "", _ -> #(model, effect.none())
+        _, _, None -> #(model, effect.none())
+        _, _, Some(socket) -> {
+          let prompt = case string.trim(form.system_prompt) {
+            "" -> "You are " <> label <> ", a helpful AI assistant."
+            p -> p
+          }
+          let command = protocol.SpawnAgent(id:, label:, system_prompt: prompt)
+          #(
+            Model(
+              ..model,
+              show_spawn_form: False,
+              spawn_form: empty_spawn_form(),
+            ),
+            send_command(socket, command),
+          )
+        }
+      }
+    }
   }
 }
 
@@ -178,7 +331,7 @@ fn parse_server_events(text: String) -> List(ServerEvent) {
   }
 }
 
-fn apply_server_event(model: Model, event: ServerEvent) -> Model {
+fn apply_server_event(state: AgentState, event: ServerEvent) -> AgentState {
   case event {
     protocol.AgentStateSnapshot(
       goal:,
@@ -190,8 +343,8 @@ fn apply_server_event(model: Model, event: ServerEvent) -> Model {
       token_records:,
       ..,
     ) ->
-      Model(
-        ..model,
+      AgentState(
+        ..state,
         goal:,
         system_prompt:,
         tasks:,
@@ -201,12 +354,13 @@ fn apply_server_event(model: Model, event: ServerEvent) -> Model {
         token_records:,
       )
 
-    protocol.GoalUpdated(text:) -> Model(..model, goal: text)
+    protocol.GoalUpdated(text:) -> AgentState(..state, goal: text)
 
-    protocol.SystemPromptUpdated(text:) -> Model(..model, system_prompt: text)
+    protocol.SystemPromptUpdated(text:) ->
+      AgentState(..state, system_prompt: text)
 
     protocol.ConversationAppended(item:) ->
-      Model(..model, log: list.append(model.log, [item]))
+      AgentState(..state, log: list.append(state.log, [item]))
 
     protocol.TaskCreated(id:, description:) -> {
       let snapshot =
@@ -217,13 +371,13 @@ fn apply_server_event(model: Model, event: ServerEvent) -> Model {
           memories: [],
           ui_expanded: False,
         )
-      Model(..model, tasks: list.append(model.tasks, [snapshot]))
+      AgentState(..state, tasks: list.append(state.tasks, [snapshot]))
     }
 
     protocol.TaskStatusChanged(id:, status:) ->
-      Model(
-        ..model,
-        tasks: list.map(model.tasks, fn(t) {
+      AgentState(
+        ..state,
+        tasks: list.map(state.tasks, fn(t) {
           case t.id == id {
             True -> protocol.TaskSnapshot(..t, status:)
             False -> t
@@ -232,9 +386,9 @@ fn apply_server_event(model: Model, event: ServerEvent) -> Model {
       )
 
     protocol.TaskMemoryAdded(id:, text:) ->
-      Model(
-        ..model,
-        tasks: list.map(model.tasks, fn(t) {
+      AgentState(
+        ..state,
+        tasks: list.map(state.tasks, fn(t) {
           case t.id == id {
             True ->
               protocol.TaskSnapshot(
@@ -247,9 +401,9 @@ fn apply_server_event(model: Model, event: ServerEvent) -> Model {
       )
 
     protocol.TaskMemoryRemoved(id:, index:) ->
-      Model(
-        ..model,
-        tasks: list.map(model.tasks, fn(t) {
+      AgentState(
+        ..state,
+        tasks: list.map(state.tasks, fn(t) {
           case t.id == id {
             True ->
               protocol.TaskSnapshot(..t, memories: remove_at(t.memories, index))
@@ -259,9 +413,9 @@ fn apply_server_event(model: Model, event: ServerEvent) -> Model {
       )
 
     protocol.TaskMemoryEdited(id:, index:, new_text:) ->
-      Model(
-        ..model,
-        tasks: list.map(model.tasks, fn(t) {
+      AgentState(
+        ..state,
+        tasks: list.map(state.tasks, fn(t) {
           case t.id == id {
             True ->
               protocol.TaskSnapshot(
@@ -276,36 +430,53 @@ fn apply_server_event(model: Model, event: ServerEvent) -> Model {
     protocol.TokensUsed(input:, output:) -> {
       let record =
         protocol.TokenRecord(
-          request_number: list.length(model.token_records) + 1,
+          request_number: list.length(state.token_records) + 1,
           input_tokens: input,
           output_tokens: output,
         )
-      Model(..model, token_records: list.append(model.token_records, [record]))
+      AgentState(
+        ..state,
+        token_records: list.append(state.token_records, [record]),
+      )
     }
 
     protocol.FileExplorerUpdated(directories:, files:) ->
-      Model(..model, directories:, files:)
+      AgentState(..state, directories:, files:)
 
     protocol.ToolCallStarted(name:, call_id:, ..) ->
-      Model(
-        ..model,
-        active_tool_calls: dict.insert(model.active_tool_calls, call_id, name),
+      AgentState(
+        ..state,
+        active_tool_calls: dict.insert(state.active_tool_calls, call_id, name),
       )
 
     protocol.ToolCallCompleted(call_id:, ..) ->
-      Model(
-        ..model,
-        active_tool_calls: dict.delete(model.active_tool_calls, call_id),
+      AgentState(
+        ..state,
+        active_tool_calls: dict.delete(state.active_tool_calls, call_id),
       )
 
-    protocol.TurnStarted -> Model(..model, thinking: True)
+    protocol.TurnStarted -> AgentState(..state, thinking: True)
 
     protocol.TurnCompleted(..) ->
-      Model(..model, thinking: False, active_tool_calls: dict.new())
+      AgentState(..state, thinking: False, active_tool_calls: dict.new())
 
     protocol.AgentError(..) ->
-      Model(..model, thinking: False, active_tool_calls: dict.new())
+      AgentState(..state, thinking: False, active_tool_calls: dict.new())
+
+    // AgentListChanged and AgentSpawnFailed are handled at the Model level,
+    // not the per-agent state level — they pass through here unchanged.
+    protocol.AgentListChanged(..) | protocol.AgentSpawnFailed(..) -> state
   }
+}
+
+/// Apply model-level events (agent list changes) after per-agent state updates.
+fn apply_model_events(model: Model, events: List(ServerEvent)) -> Model {
+  list.fold(events, model, fn(m, event) {
+    case event {
+      protocol.AgentListChanged(agents:) -> Model(..m, agent_list: agents)
+      _ -> m
+    }
+  })
 }
 
 // ============================================================================
@@ -326,6 +497,12 @@ fn delay_effect(msg: Msg, delay_ms: Int) -> Effect(Msg) {
 
 fn scroll_chat_effect() -> Effect(Msg) {
   effect.from(fn(_dispatch) { ffi_scroll_to_bottom("chat-log") })
+}
+
+fn fetch_agent_list() -> Effect(Msg) {
+  effect.from(fn(dispatch) {
+    ffi_fetch_json("/agents", fn(text) { dispatch(AgentListReceived(text)) })
+  })
 }
 
 // ============================================================================
@@ -358,10 +535,67 @@ fn view_top_bar(model: Model) -> Element(Msg) {
     html.span([attribute.class("status " <> status_class)], [
       html.text(status_text),
     ]),
+    view_agent_tabs(model),
+  ])
+}
+
+fn view_agent_tabs(model: Model) -> Element(Msg) {
+  let tabs =
+    list.map(model.agent_list, fn(info) {
+      let is_active = info.id == model.active_agent
+      let classes = case is_active {
+        True -> "agent-tab active"
+        False -> "agent-tab"
+      }
+      html.button(
+        [attribute.class(classes), event.on_click(SwitchAgent(info.id))],
+        [html.text(info.label)],
+      )
+    })
+  let add_or_form = case model.show_spawn_form {
+    False ->
+      html.button(
+        [attribute.class("add-agent-btn"), event.on_click(ToggleSpawnForm)],
+        [html.text("+")],
+      )
+    True -> view_spawn_form(model.spawn_form)
+  }
+  html.div([attribute.class("agent-tabs")], list.append(tabs, [add_or_form]))
+}
+
+fn view_spawn_form(form: SpawnForm) -> Element(Msg) {
+  html.div([attribute.class("spawn-form")], [
+    html.input([
+      attribute.class("spawn-input"),
+      attribute.placeholder("id"),
+      attribute.value(form.id),
+      event.on_input(UpdateSpawnId),
+    ]),
+    html.input([
+      attribute.class("spawn-input"),
+      attribute.placeholder("label"),
+      attribute.value(form.label),
+      event.on_input(UpdateSpawnLabel),
+    ]),
+    html.input([
+      attribute.class("spawn-input wide"),
+      attribute.placeholder("system prompt (optional)"),
+      attribute.value(form.system_prompt),
+      event.on_input(UpdateSpawnPrompt),
+      on_enter_key(SubmitSpawn),
+    ]),
+    html.button([attribute.class("spawn-submit"), event.on_click(SubmitSpawn)], [
+      html.text("Create"),
+    ]),
+    html.button(
+      [attribute.class("spawn-cancel"), event.on_click(ToggleSpawnForm)],
+      [html.text("Cancel")],
+    ),
   ])
 }
 
 fn view_sidebar(model: Model) -> Element(Msg) {
+  let state = active_state(model)
   html.aside([attribute.class("sidebar")], [
     html.nav([attribute.class("sidebar-icons")], [
       sidebar_icon("Goal", GoalPanel, model.active_panel),
@@ -374,10 +608,10 @@ fn view_sidebar(model: Model) -> Element(Msg) {
       Some(panel) ->
         html.div([attribute.class("panel-content")], [
           case panel {
-            GoalPanel -> view_goal_panel(model)
-            TasksPanel -> view_tasks_panel(model)
-            FilesPanel -> view_files_panel(model)
-            TokensPanel -> view_tokens_panel(model)
+            GoalPanel -> view_goal_panel(state)
+            TasksPanel -> view_tasks_panel(state)
+            FilesPanel -> view_files_panel(state)
+            TokensPanel -> view_tokens_panel(state)
           },
         ])
     },
@@ -400,20 +634,20 @@ fn sidebar_icon(
   )
 }
 
-fn view_goal_panel(model: Model) -> Element(Msg) {
+fn view_goal_panel(state: AgentState) -> Element(Msg) {
   html.div([attribute.class("panel")], [
     html.h3([], [html.text("Goal")]),
-    case model.goal {
+    case state.goal {
       None -> html.p([attribute.class("muted")], [html.text("No goal set")])
       Some(text) -> html.p([], [html.text(text)])
     },
   ])
 }
 
-fn view_tasks_panel(model: Model) -> Element(Msg) {
+fn view_tasks_panel(state: AgentState) -> Element(Msg) {
   html.div([attribute.class("panel")], [
     html.h3([], [html.text("Tasks")]),
-    case model.tasks {
+    case state.tasks {
       [] -> html.p([attribute.class("muted")], [html.text("No tasks")])
       tasks ->
         html.ul([attribute.class("task-list")], list.map(tasks, view_task_item))
@@ -440,10 +674,10 @@ fn view_task_item(snapshot: TaskSnapshot) -> Element(Msg) {
   ])
 }
 
-fn view_files_panel(model: Model) -> Element(Msg) {
+fn view_files_panel(state: AgentState) -> Element(Msg) {
   html.div([attribute.class("panel")], [
     html.h3([], [html.text("Files")]),
-    case model.directories {
+    case state.directories {
       [] ->
         html.p([attribute.class("muted")], [html.text("No directories open")])
       dirs ->
@@ -470,11 +704,11 @@ fn view_files_panel(model: Model) -> Element(Msg) {
   ])
 }
 
-fn view_tokens_panel(model: Model) -> Element(Msg) {
+fn view_tokens_panel(state: AgentState) -> Element(Msg) {
   let total_in =
-    list.fold(model.token_records, 0, fn(acc, r) { acc + r.input_tokens })
+    list.fold(state.token_records, 0, fn(acc, r) { acc + r.input_tokens })
   let total_out =
-    list.fold(model.token_records, 0, fn(acc, r) { acc + r.output_tokens })
+    list.fold(state.token_records, 0, fn(acc, r) { acc + r.output_tokens })
   html.div([attribute.class("panel")], [
     html.h3([], [html.text("Token Usage")]),
     html.div([attribute.class("token-summary")], [
@@ -489,7 +723,7 @@ fn view_tokens_panel(model: Model) -> Element(Msg) {
       ]),
       html.div([], [
         html.text(
-          "Requests: " <> int.to_string(list.length(model.token_records)),
+          "Requests: " <> int.to_string(list.length(state.token_records)),
         ),
       ]),
     ]),
@@ -501,11 +735,12 @@ fn view_tokens_panel(model: Model) -> Element(Msg) {
 // ============================================================================
 
 fn view_chat(model: Model) -> Element(Msg) {
+  let state = active_state(model)
   html.div([attribute.class("chat")], [
     html.div([attribute.class("chat-log"), attribute.id("chat-log")], [
-      html.div([], list.map(model.log, view_log_item)),
-      view_active_tool_calls(model),
-      view_thinking_indicator(model),
+      html.div([], list.map(state.log, view_log_item)),
+      view_active_tool_calls(state),
+      view_thinking_indicator(state),
     ]),
     view_input_bar(model),
   ])
@@ -588,8 +823,8 @@ fn view_log_item(item: LogItemSnapshot) -> Element(Msg) {
   }
 }
 
-fn view_active_tool_calls(model: Model) -> Element(Msg) {
-  let calls = dict.to_list(model.active_tool_calls)
+fn view_active_tool_calls(state: AgentState) -> Element(Msg) {
+  let calls = dict.to_list(state.active_tool_calls)
   case calls {
     [] -> html.text("")
     _ ->
@@ -605,8 +840,8 @@ fn view_active_tool_calls(model: Model) -> Element(Msg) {
   }
 }
 
-fn view_thinking_indicator(model: Model) -> Element(Msg) {
-  case model.thinking {
+fn view_thinking_indicator(state: AgentState) -> Element(Msg) {
+  case state.thinking {
     False -> html.text("")
     True ->
       html.div([attribute.class("thinking")], [

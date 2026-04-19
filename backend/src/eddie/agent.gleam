@@ -35,7 +35,7 @@ import eddie_shared/turn_result as shared_turn_result
 
 /// Configuration for creating an agent.
 pub type AgentConfig {
-  AgentConfig(llm_config: LlmConfig, system_prompt: String)
+  AgentConfig(agent_id: String, llm_config: LlmConfig, system_prompt: String)
 }
 
 /// Partial overrides for child agent configuration.
@@ -52,9 +52,11 @@ pub type AgentConfigOverride {
 /// None fields in the override inherit from the parent.
 pub fn merge_config(
   parent parent: AgentConfig,
+  child_id child_id: String,
   override override: AgentConfigOverride,
 ) -> AgentConfig {
   AgentConfig(
+    agent_id: child_id,
     llm_config: llm.LlmConfig(
       api_base: option.unwrap(override.api_base, parent.llm_config.api_base),
       api_key: parent.llm_config.api_key,

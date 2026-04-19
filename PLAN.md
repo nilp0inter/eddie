@@ -281,22 +281,56 @@ frontend/
 
 ---
 
-## Phase 5: Multi-agent support and cleanup
+## Phase 5: Multi-agent support and cleanup ✅
 
-**Goal:** Frontend supports viewing/switching between multiple agents. Remove dead code, update docs.
+**Status: Complete.**
 
-### Frontend changes
-- Agent selector in the UI (tab bar or dropdown)
-- Each agent has its own WebSocket subscription
-- `Model.agents` dict holds per-agent state
-- Switching agents changes `active_agent`, renders that agent's state
+Multi-agent support added across the full stack. The server routes WebSocket connections per agent, the frontend supports agent switching via a tab bar, and `AgentTree` is now an OTP actor for runtime child spawning.
 
-### Cleanup (partially done in Phase 4)
-- ~~Remove `backend/src/eddie/frontend.gleam`~~ (done in Phase 4)
-- ~~Update `CLAUDE.md` with new project structure~~ (done in Phase 4)
-- ~~Update `Taskfile.yml` with full monorepo tasks~~ (done in Phase 4)
-- Update mdBook docs
+### What was done
+
+**Shared package:**
+- Added `AgentInfo(id, label)` type with JSON encoder/decoder to `protocol.gleam`
+- Added roundtrip test for `AgentInfo`
+
+**Agent config — `agent_id` field:**
+- `AgentConfig` now includes `agent_id: String`
+- `merge_config` takes `child_id` parameter — children get their own id
+- Entry point sets `agent_id: "root"` for the root agent
+
+**AgentTree — OTP actor rewrite:**
+- `agent_tree.gleam` is now an OTP actor (was a plain value type)
+- Messages: `GetRoot`, `GetAgent(id)`, `ListAgents`, `SpawnChild(id, label, override)`
+- Public API via `process.call`: `root(tree)`, `get_agent(tree, id)`, `list_agents(tree)`, `spawn_child(tree, id, label, override)`
+- Children can be spawned at runtime; the server always sees the latest state
+- Children stored as `Dict(String, #(Subject(AgentMessage), String))` (subject + label)
+
+**Server — per-agent WebSocket routing:**
+- `start` now takes `tree: Subject(AgentTreeMessage)` instead of a single agent
+- WebSocket path: `/ws/<agent_id>` (with `/ws` as backwards-compatible alias for root)
+- `GET /agents` returns JSON list of `AgentInfo` for all agents
+- WebSocket upgrade looks up agent by ID; returns 404 for unknown agents
+
+**Entry point:**
+- Creates `AgentTree` instead of a single agent
+- Passes tree subject to server
+
+**Frontend — multi-agent model:**
+- Extracted `AgentState` type holding per-agent state (goal, tasks, log, files, tokens, thinking, tool calls)
+- `Model.agents: Dict(String, AgentState)` caches state per agent
+- `Model.active_agent: String` tracks selected agent
+- `Model.agent_list: List(AgentInfo)` populated from `GET /agents` on init
+- Agent tab bar in top bar — clicking switches WebSocket connection
+- `SwitchAgent(id)` closes old WS, opens new to `/ws/<id>`
+- JS FFI `fetch_json` added for agent list fetch
+
+**Tests:**
+- All agent tree tests updated for actor-based API (Subject instead of value)
+- Added `get_root_by_id_test` and `list_agents_test`
+- All test configs include `agent_id`
+- Config merge tests verify `child_id` is applied
 
 ### Verification
-- All tests pass across all three projects
-- End-to-end manual test with multiple agents
+- 165 backend tests pass, 46 shared tests pass
+- `backend:lint` clean (0 errors)
+- All packages formatted

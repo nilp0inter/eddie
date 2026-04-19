@@ -342,3 +342,40 @@ pub fn read_file_roundtrip_test() {
 pub fn close_read_file_roundtrip_test() {
   roundtrip_client_command(protocol.CloseReadFile(path: "/home/file.txt"))
 }
+
+// ============================================================================
+// AgentInfo roundtrip tests
+// ============================================================================
+
+pub fn agent_info_roundtrip_test() {
+  let info = protocol.AgentInfo(id: "child-1", label: "Research Agent")
+  info
+  |> protocol.agent_info_to_json
+  |> json.to_string
+  |> json.parse(protocol.agent_info_decoder())
+  |> should.equal(Ok(info))
+}
+
+pub fn agent_list_changed_roundtrip_test() {
+  roundtrip_server_event(
+    protocol.AgentListChanged(agents: [
+      protocol.AgentInfo(id: "root", label: "Root"),
+      protocol.AgentInfo(id: "research", label: "Research"),
+    ]),
+  )
+}
+
+pub fn agent_spawn_failed_roundtrip_test() {
+  roundtrip_server_event(protocol.AgentSpawnFailed(
+    id: "bad-agent",
+    reason: "Child already exists",
+  ))
+}
+
+pub fn spawn_agent_roundtrip_test() {
+  roundtrip_client_command(protocol.SpawnAgent(
+    id: "research",
+    label: "Research Agent",
+    system_prompt: "You are a research assistant.",
+  ))
+}

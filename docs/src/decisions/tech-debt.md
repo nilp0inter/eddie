@@ -46,7 +46,7 @@ After sending usage data to the token_usage widget, `record_token_usage` creates
 
 ## AgentTree holds dead Subjects after child crashes
 
-`AgentTree` stores child agent Subjects in a `Dict` but has no process monitoring. If a child actor crashes, its Subject remains in the dict. Any attempt to communicate with the dead child (via `agent.run_turn`, `agent.get_child`) will hang until the call timeout. There is no API to remove a child or detect a crashed one. Adding `process.monitor` for each child and handling `ProcessDown` messages would fix this, but requires `AgentTree` to become an actor itself (currently it's a pure data structure).
+`AgentTree` is an OTP actor that stores child agent Subjects in a `Dict` but has no process monitoring. If a child actor crashes, its Subject remains in the dict. Any attempt to communicate with the dead child (via `agent_tree.get_agent`) will return a dead Subject, and calls to it will hang until timeout. There is no API to remove a child or detect a crashed one. Adding `process.monitor` for each child and handling `ProcessDown` messages in the tree actor would fix this.
 
 ## File explorer reads entire files into memory
 

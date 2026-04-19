@@ -1,6 +1,6 @@
 # Agent tree without OTP supervision
 
-**The decision.** `AgentTree` spawns child agents as standalone OTP actors via `agent.start_with_send_fn` instead of placing them under an OTP supervisor.
+**The decision.** `AgentTree` spawns child agents as standalone OTP actors via `agent.start_with_send_fn` instead of placing them under an OTP supervisor. The tree itself is an OTP actor (for runtime child spawning and lookup), but it does not supervise its children.
 
 ## Why this and not the alternatives
 
@@ -8,13 +8,12 @@ The main alternative was using `gleam_otp`'s `supervisor` module to supervise ch
 
 - The current agent actor has no crash recovery semantics — a crashed turn loop loses all context state (the entire `Context` is in-process memory). Restarting a crashed agent with an empty context is worse than not restarting, since the user loses all conversation history with no indication of what happened.
 - Supervision adds complexity (child specs, restart strategies, shutdown ordering) that provides no value until agents have persistent state that can survive a restart.
-- The `AgentTree` is a pure data structure (not an actor itself), keeping it simple to test and reason about.
 
 ## What it costs
 
-- No automatic recovery if a child agent process crashes — the parent's `AgentTree` will hold a dead Subject, and calls to it will time out.
-- No structured shutdown — stopping the root agent does not stop children. Orphaned child actors continue running until the BEAM VM shuts down.
-- No health monitoring — the parent has no way to detect a crashed child without attempting to communicate with it.
+- No automatic recovery if a child agent process crashes — the tree actor will hold a dead Subject, and calls to it will time out.
+- No structured shutdown — stopping the tree does not stop children. Orphaned child actors continue running until the BEAM VM shuts down.
+- No health monitoring — the tree has no way to detect a crashed child without attempting to communicate with it.
 
 ## What would make us reconsider
 

@@ -47,6 +47,7 @@ fn escape_json_string(s: String) -> String {
 
 fn test_config() -> agent.AgentConfig {
   agent.AgentConfig(
+    agent_id: "test-agent",
     llm_config: llm.LlmConfig(
       api_base: "https://test.example.com/v1",
       api_key: "test-key",

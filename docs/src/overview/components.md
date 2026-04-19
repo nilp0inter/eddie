@@ -6,9 +6,9 @@
 
 Reactive OTP actor that owns the agent state and manages the LLM turn loop. The agent never blocks — LLM calls and tool effects are spawned as async processes that send results back as actor messages. User messages arriving during a turn are queued and processed after the current turn completes.
 
-- **`AgentConfig(llm_config, system_prompt)`** — configuration passed at start
+- **`AgentConfig(agent_id, llm_config, system_prompt)`** — configuration passed at start. `agent_id` identifies the agent within the tree (e.g. `"root"`)
 - **`AgentConfigOverride(model, api_base, system_prompt)`** — partial overrides for child agents (all fields `Option`). API key is always inherited
-- **`merge_config(parent, override)`** — produces a child `AgentConfig` from a parent config and an override (None fields inherit from parent)
+- **`merge_config(parent, child_id, override)`** — produces a child `AgentConfig` from a parent config, a child ID, and an override (None fields inherit from parent)
 - **`AgentMessage`** — opaque message type with eleven variants:
   - `UserMessage(text, reply_to)` — user message with optional reply Subject
   - `GetState(reply_to)` — return current Context for inspection
@@ -55,10 +55,14 @@ During tool dispatch, the agent sends `ToolCallStarted` and `ToolCallCompleted` 
 
 ### `eddie/server`
 
-Mist HTTP and WebSocket server. The server is thin glue between the Lustre SPA frontend and the agent actor. It serves the HTML shell and bundled frontend JS, and relays `ClientCommand` JSON over WebSocket.
+Mist HTTP and WebSocket server. The server is thin glue between the Lustre SPA frontend and the agent tree. It serves the HTML shell and bundled frontend JS, routes WebSocket connections to specific agents, and provides a REST endpoint for listing available agents.
 
 - **`ServerConfig(port)`** — listening port configuration
-- **`start(config, agent)`** — starts mist, returns `Result(Started(Supervisor), StartError)`
+- **`start(config, tree)`** — starts mist with an `AgentTree` subject, returns `Result(Started(Supervisor), StartError)`
+
+**WebSocket registry:**
+
+The server creates a `WsRegistry` OTP actor that tracks all connected WebSocket client Subjects. This enables server-wide broadcasts (e.g. `AgentListChanged` when a new agent is spawned). Each WebSocket connection registers on init and unregisters on close.
 
 **Routes:**
 
@@ -66,12 +70,16 @@ Mist HTTP and WebSocket server. The server is thin glue between the Lustre SPA f
 |---|---|---|
 | `GET` | `/` | Serves the HTML shell (`<div id="app">` + `<script src="/app.js">`) |
 | `GET` | `/app.js` | Serves the bundled Lustre SPA JS (read from `../frontend/build/app.js` via simplifile) |
-| `GET` | `/ws` | WebSocket upgrade |
+| `GET` | `/agents` | Returns JSON array of `AgentInfo` records (id + label) for all agents in the tree |
+| `GET` | `/ws/<agent_id>` | WebSocket upgrade for a specific agent (looks up agent in tree, returns 404 if not found) |
+| `GET` | `/ws` | WebSocket upgrade for the root agent (backwards compatible) |
 | `*` | `*` | 404 |
 
 **WebSocket protocol:**
 
-Each WebSocket connection is a separate BEAM process. On init, it creates a Subject for state updates (`Subject(String)`) and builds a Selector mapping it to `StateUpdate`. The connection subscribes to the agent for state updates, then immediately sends the current widget state via `agent.get_current_state` so that the frontend is populated on first load (without this, the frontend would remain empty until the first state mutation).
+Each WebSocket connection is a separate BEAM process bound to a specific agent (identified by the URL path). On init, it creates a Subject for state updates (`Subject(String)`), subscribes to the target agent, registers with the `WsRegistry` for broadcasts, and immediately sends the current widget state via `agent.get_current_state` so that the frontend is populated on first load.
+
+The connection state (`WsState`) holds the agent Subject, the tree Subject, the registry Subject, and the update Subject — giving it access to both per-agent operations and tree-level operations like spawning.
 
 *Client → Server messages (JSON over WebSocket):*
 
@@ -80,6 +88,7 @@ The frontend sends `ClientCommand` JSON (defined in `eddie_shared/protocol`). Ea
 | Command type | Effect |
 |---|---|
 | `send_user_message` | Calls `agent.send_message` (fire-and-forget) |
+| `spawn_agent` | Calls `agent_tree.spawn_child`, broadcasts `AgentListChanged` to all clients via registry. On failure, sends `AgentSpawnFailed` to the requesting client only |
 | All other commands | Mapped to widget event dispatch via `agent.dispatch_event` |
 
 Turn lifecycle events (`TurnStarted`, `TurnCompleted`) flow through the subscriber mechanism — the server does not need to track turn state separately.
@@ -100,23 +109,31 @@ All server-to-client messages are JSON-encoded arrays of `ServerEvent` objects (
 | `tool_call_started`, `tool_call_completed` | Tool call progress during a turn |
 | `turn_started`, `turn_completed` | Turn lifecycle (thinking indicator) |
 | `agent_error` | Unrecoverable agent error |
+| `agent_list_changed` | List of available agents changed (after spawn) |
+| `agent_spawn_failed` | A spawn request failed (sent to requesting client only) |
 
 ### Lustre SPA frontend (`eddie_frontend`)
 
-Single-module Lustre application (`frontend/src/eddie_frontend.gleam`) that renders the chat UI and sidebar panels. Compiled to JavaScript and bundled with esbuild.
+Single-module Lustre application (`frontend/src/eddie_frontend.gleam`) that renders the chat UI and sidebar panels. Compiled to JavaScript and bundled with esbuild. Supports multiple agents with per-agent state caching and WebSocket switching.
 
-- **WebSocket:** uses `lustre_websocket` to connect to `/ws`, auto-reconnects on disconnect
-- **Model:** holds connection status, agent state (goal, tasks, conversation log, files, token records), chat input, thinking indicator, active tool calls, and active sidebar panel
-- **Update:** folds all `ServerEvent`s from a WebSocket message into the model in a single update cycle (one re-render per message batch). `AgentStateSnapshot` replaces all model fields; incremental events update individual fields
-- **View:** top bar (connection status) + main area (sidebar left, chat right) + input bar
+- **WebSocket:** uses `lustre_websocket` to connect to `/ws/<agent_id>`, auto-reconnects on disconnect. Switching agents closes the current WebSocket and opens a new one
+- **Multi-agent model:**
+  - `AgentState` — per-agent cached state (goal, tasks, log, directories, files, token records, thinking indicator, active tool calls)
+  - `Model.agents: Dict(String, AgentState)` — cached state per agent
+  - `Model.active_agent: String` — currently selected agent ID
+  - `Model.agent_list: List(AgentInfo)` — available agents, fetched from `GET /agents` on init and updated via `AgentListChanged` events
+- **Agent tab bar:** displays all available agents as tabs in the top bar. Clicking a tab switches the WebSocket connection and renders that agent's cached state. A "+" button opens an inline spawn form (id, label, optional system prompt) that sends a `SpawnAgent` command
+- **Update:** folds all `ServerEvent`s from a WebSocket message into the active agent's state. Model-level events (`AgentListChanged`) are applied separately. One re-render per message batch
+- **View:** top bar (connection status + agent tabs) + main area (sidebar left, chat right) + input bar
 - **Chat view:** user messages, assistant responses with tool call badges, collapsible tool results, thinking indicator with pulsing animation
 - **Sidebar panels:** Goal, Tasks (with status icons and memories), Files (directory tree), Token Usage (totals and request count)
+- **JS FFI:** `setTimeout`, `scrollToBottom`, `fetchJson` (for agent list REST fetch)
 - **Theme:** Catppuccin Mocha dark theme via CSS in the HTML shell
 - **Build:** `task frontend:bundle` runs `gleam build` then `esbuild` to produce `frontend/build/app.js`
 
 ### `eddie` (entry point)
 
-Application entry point. Reads configuration from environment variables, creates the agent and server, then sleeps forever (the BEAM scheduler keeps the actor and server alive).
+Application entry point. Reads configuration from environment variables, creates an `AgentTree` (with the root agent) and the server, then sleeps forever (the BEAM scheduler keeps the actors alive).
 
 | Env var | Required | Default | Purpose |
 |---|---|---|---|
@@ -125,18 +142,19 @@ Application entry point. Reads configuration from environment variables, creates
 | `EDDIE_MODEL` | No | `anthropic/claude-sonnet-4` | Model identifier |
 | `EDDIE_PORT` | No | `8080` | HTTP listening port |
 
-### `eddie/agent_tree` (Phase 6)
+### `eddie/agent_tree`
 
-Manages hierarchical parent-child agent relationships. Each agent in the tree is an independent OTP actor with its own context and turn loop.
+OTP actor that manages hierarchical parent-child agent relationships. Each agent in the tree is an independent OTP actor with its own context and turn loop. The tree itself is an actor so children can be spawned at runtime and looked up by the server without holding a stale reference.
 
-- **`AgentTree`** — opaque type holding the root agent, root config, children dict, and send_fn
-- **`start(config)` / `start_with_send_fn(config, send_fn)`** — creates a tree with a root agent
-- **`spawn_child(tree, id, override)`** — starts a child agent with `merge_config(root_config, override)`, returns `Result(AgentTree, SpawnError)`
+- **`AgentTreeMessage`** — opaque message type with four variants: `GetRoot`, `GetAgent(id)`, `ListAgents`, `SpawnChild(id, label, override)`
+- **`start(config)` / `start_with_send_fn(config, send_fn)`** — creates a tree with a root agent, returns `Result(Subject(AgentTreeMessage), StartError)`
+- **`root(tree)`** — returns the root agent's Subject (via `process.call`)
+- **`get_agent(tree, id)`** — looks up an agent by ID (`"root"` returns the root, other IDs look up children), returns `Result(Subject(AgentMessage), Nil)`
+- **`list_agents(tree)`** — returns `List(AgentInfo)` with root (always first) and all children
+- **`spawn_child(tree, id, label, override)`** — starts a child agent with `merge_config(root_config, child_id, override)`, returns `Result(Nil, SpawnError)`
 - **`SpawnError`** — `ChildAlreadyExists(id)` | `ChildStartFailed(StartError)`
-- **`get_child(tree, id)`** — looks up a child by ID
-- **`root(tree)` / `children(tree)`** — accessors
 
-Children share the parent's `send_fn` (HTTP sender) and API key. The tree does not use OTP supervision — each child is a standalone actor started with `agent.start_with_send_fn`. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
+Children are stored as `Dict(String, #(Subject(AgentMessage), String))` (subject + label). They share the parent's `send_fn` (HTTP sender) and API key. The tree does not use OTP supervision — each child is a standalone actor started with `agent.start_with_send_fn`. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
 
 ## Widgets (Phase 2 + Phase 6)
 

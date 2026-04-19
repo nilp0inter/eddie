@@ -64,6 +64,10 @@ pub type ServerEvent {
   TurnCompleted(result: TurnResult)
   /// An unrecoverable agent error.
   AgentError(reason: String)
+  /// The list of available agents changed (agent spawned).
+  AgentListChanged(agents: List(AgentInfo))
+  /// A spawn request failed.
+  AgentSpawnFailed(id: String, reason: String)
 }
 
 // ============================================================================
@@ -108,6 +112,17 @@ pub type ClientCommand {
   ReadFile(path: String)
   /// Close a read file in the file explorer.
   CloseReadFile(path: String)
+  /// Spawn a new child agent.
+  SpawnAgent(id: String, label: String, system_prompt: String)
+}
+
+// ============================================================================
+// Agent metadata
+// ============================================================================
+
+/// Information about an available agent.
+pub type AgentInfo {
+  AgentInfo(id: String, label: String)
 }
 
 // ============================================================================
@@ -232,6 +247,13 @@ pub fn token_record_to_json(record: TokenRecord) -> json.Json {
   ])
 }
 
+pub fn agent_info_to_json(info: AgentInfo) -> json.Json {
+  json.object([
+    #("id", json.string(info.id)),
+    #("label", json.string(info.label)),
+  ])
+}
+
 pub fn server_event_to_json(event: ServerEvent) -> json.Json {
   case event {
     AgentStateSnapshot(
@@ -338,6 +360,17 @@ pub fn server_event_to_json(event: ServerEvent) -> json.Json {
         #("type", json.string("agent_error")),
         #("reason", json.string(reason)),
       ])
+    AgentListChanged(agents) ->
+      json.object([
+        #("type", json.string("agent_list_changed")),
+        #("agents", json.array(agents, agent_info_to_json)),
+      ])
+    AgentSpawnFailed(id, reason) ->
+      json.object([
+        #("type", json.string("agent_spawn_failed")),
+        #("id", json.string(id)),
+        #("reason", json.string(reason)),
+      ])
   }
 }
 
@@ -435,6 +468,13 @@ pub fn client_command_to_json(command: ClientCommand) -> json.Json {
         #("type", json.string("close_read_file")),
         #("path", json.string(path)),
       ])
+    SpawnAgent(id, label, system_prompt) ->
+      json.object([
+        #("type", json.string("spawn_agent")),
+        #("id", json.string(id)),
+        #("label", json.string(label)),
+        #("system_prompt", json.string(system_prompt)),
+      ])
   }
 }
 
@@ -512,6 +552,12 @@ pub fn token_record_decoder() -> decode.Decoder(TokenRecord) {
   use input_tokens <- decode.field("input_tokens", decode.int)
   use output_tokens <- decode.field("output_tokens", decode.int)
   decode.success(TokenRecord(request_number:, input_tokens:, output_tokens:))
+}
+
+pub fn agent_info_decoder() -> decode.Decoder(AgentInfo) {
+  use id <- decode.field("id", decode.string)
+  use label <- decode.field("label", decode.string)
+  decode.success(AgentInfo(id:, label:))
 }
 
 pub fn server_event_decoder() -> decode.Decoder(ServerEvent) {
@@ -615,6 +661,15 @@ pub fn server_event_decoder() -> decode.Decoder(ServerEvent) {
       use reason <- decode.field("reason", decode.string)
       decode.success(AgentError(reason:))
     }
+    "agent_list_changed" -> {
+      use agents <- decode.field("agents", decode.list(agent_info_decoder()))
+      decode.success(AgentListChanged(agents:))
+    }
+    "agent_spawn_failed" -> {
+      use id <- decode.field("id", decode.string)
+      use reason <- decode.field("reason", decode.string)
+      decode.success(AgentSpawnFailed(id:, reason:))
+    }
     _ -> decode.failure(TurnStarted, "ServerEvent")
   }
 }
@@ -687,6 +742,12 @@ pub fn client_command_decoder() -> decode.Decoder(ClientCommand) {
     "close_read_file" -> {
       use path <- decode.field("path", decode.string)
       decode.success(CloseReadFile(path:))
+    }
+    "spawn_agent" -> {
+      use id <- decode.field("id", decode.string)
+      use label <- decode.field("label", decode.string)
+      use system_prompt <- decode.field("system_prompt", decode.string)
+      decode.success(SpawnAgent(id:, label:, system_prompt:))
     }
     _ -> decode.failure(ClearGoal, "ClientCommand")
   }

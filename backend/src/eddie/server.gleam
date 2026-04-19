@@ -1,17 +1,18 @@
 /// HTTP server and WebSocket handler — serves the Eddie web UI.
 ///
 /// Uses mist for HTTP serving and WebSocket connections.
-/// Each WebSocket connection subscribes to the agent for state updates.
-/// The agent broadcasts all events (including TurnStarted/TurnCompleted)
-/// through the subscriber mechanism.
+/// Each WebSocket connection subscribes to a specific agent (identified
+/// by path: /ws/<agent_id>) for state updates.
 import eddie/agent.{type AgentMessage}
+import eddie/agent_tree.{type AgentTreeMessage}
 import eddie_shared/protocol
 import gleam/bytes_tree
 import gleam/erlang/process.{type Subject}
 import gleam/http/request
 import gleam/http/response
 import gleam/json
-import gleam/option.{type Option, Some}
+import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/otp/static_supervisor.{type Supervisor}
 import mist
@@ -22,12 +23,84 @@ pub type ServerConfig {
   ServerConfig(port: Int)
 }
 
+// ============================================================================
+// WebSocket registry — tracks all connected clients for broadcasts
+// ============================================================================
+
+/// Messages for the WebSocket registry actor.
+pub opaque type RegistryMessage {
+  Register(subject: Subject(String))
+  Unregister(subject: Subject(String))
+  Broadcast(payload: String)
+}
+
+type RegistryState {
+  RegistryState(clients: List(Subject(String)))
+}
+
+fn start_registry() -> Result(Subject(RegistryMessage), actor.StartError) {
+  let result =
+    actor.new(RegistryState(clients: []))
+    |> actor.on_message(handle_registry_message)
+    |> actor.start
+  case result {
+    Ok(started) -> Ok(started.data)
+    Error(err) -> Error(err)
+  }
+}
+
+fn handle_registry_message(
+  state: RegistryState,
+  msg: RegistryMessage,
+) -> actor.Next(RegistryState, RegistryMessage) {
+  case msg {
+    Register(subject) ->
+      actor.continue(RegistryState(clients: [subject, ..state.clients]))
+    Unregister(subject) ->
+      actor.continue(
+        RegistryState(
+          clients: list.filter(state.clients, fn(s) { s != subject }),
+        ),
+      )
+    Broadcast(payload) -> {
+      list.each(state.clients, fn(s) { process.send(s, payload) })
+      actor.continue(state)
+    }
+  }
+}
+
+fn registry_register(
+  registry: Subject(RegistryMessage),
+  subject: Subject(String),
+) -> Nil {
+  process.send(registry, Register(subject:))
+}
+
+fn registry_unregister(
+  registry: Subject(RegistryMessage),
+  subject: Subject(String),
+) -> Nil {
+  process.send(registry, Unregister(subject:))
+}
+
+fn registry_broadcast(
+  registry: Subject(RegistryMessage),
+  payload: String,
+) -> Nil {
+  process.send(registry, Broadcast(payload:))
+}
+
+// ============================================================================
+// Server start
+// ============================================================================
+
 /// Start the HTTP + WebSocket server.
 pub fn start(
   config config: ServerConfig,
-  agent agent: Subject(AgentMessage),
+  tree tree: Subject(AgentTreeMessage),
 ) -> Result(actor.Started(Supervisor), actor.StartError) {
-  mist.new(fn(req) { handle_request(req, agent) })
+  let assert Ok(registry) = start_registry()
+  mist.new(fn(req) { handle_request(req, tree, registry) })
   |> mist.port(config.port)
   |> mist.bind("0.0.0.0")
   |> mist.start
@@ -39,12 +112,16 @@ pub fn start(
 
 fn handle_request(
   req: request.Request(mist.Connection),
-  agent: Subject(AgentMessage),
+  tree: Subject(AgentTreeMessage),
+  registry: Subject(RegistryMessage),
 ) -> response.Response(mist.ResponseData) {
   case request.path_segments(req) {
     [] -> serve_index()
     ["app.js"] -> serve_app_js()
-    ["ws"] -> upgrade_websocket(req, agent)
+    ["agents"] -> serve_agents(tree)
+    ["ws", agent_id] -> upgrade_websocket(req, tree, registry, agent_id)
+    // Backwards compatibility: /ws with no agent_id defaults to root
+    ["ws"] -> upgrade_websocket(req, tree, registry, "root")
     _ -> not_found()
   }
 }
@@ -69,6 +146,16 @@ fn serve_app_js() -> response.Response(mist.ResponseData) {
   }
 }
 
+fn serve_agents(
+  tree: Subject(AgentTreeMessage),
+) -> response.Response(mist.ResponseData) {
+  let agents = agent_tree.list_agents(tree: tree)
+  let body = json.to_string(json.array(agents, protocol.agent_info_to_json))
+  response.new(200)
+  |> response.set_header("content-type", "application/json")
+  |> response.set_body(mist.Bytes(bytes_tree.from_string(body)))
+}
+
 fn not_found() -> response.Response(mist.ResponseData) {
   response.new(404)
   |> response.set_body(mist.Bytes(bytes_tree.from_string("Not Found")))
@@ -91,6 +178,20 @@ fn index_html() -> String {
     .status-connected { color: #a6e3a1; background: #a6e3a11a; }
     .status-connecting { color: #f9e2af; background: #f9e2af1a; }
     .status-disconnected { color: #f38ba8; background: #f38ba81a; }
+    .agent-tabs { display: flex; gap: 2px; margin-left: auto; }
+    .agent-tab { font-size: 11px; padding: 4px 10px; border-radius: 4px; border: none; cursor: pointer; font-family: inherit; background: none; color: #6c7086; }
+    .agent-tab:hover { color: #cdd6f4; background: #313244; }
+    .agent-tab.active { color: #cba6f7; background: #31324480; }
+    .add-agent-btn { font-size: 11px; padding: 4px 8px; border-radius: 4px; border: 1px dashed #45475a; cursor: pointer; font-family: inherit; background: none; color: #6c7086; }
+    .add-agent-btn:hover { color: #cdd6f4; border-color: #6c7086; }
+    .spawn-form { display: flex; gap: 6px; align-items: center; }
+    .spawn-input { padding: 3px 8px; background: #313244; color: #cdd6f4; border: 1px solid #45475a; border-radius: 4px; font-family: inherit; font-size: 11px; outline: none; width: 100px; }
+    .spawn-input:focus { border-color: #cba6f7; }
+    .spawn-input.wide { width: 180px; }
+    .spawn-submit { font-size: 11px; padding: 3px 8px; background: #a6e3a1; color: #1e1e2e; border: none; border-radius: 4px; cursor: pointer; font-family: inherit; font-weight: 600; }
+    .spawn-submit:hover { background: #94e2d5; }
+    .spawn-cancel { font-size: 11px; padding: 3px 8px; background: none; color: #6c7086; border: 1px solid #45475a; border-radius: 4px; cursor: pointer; font-family: inherit; }
+    .spawn-cancel:hover { color: #f38ba8; border-color: #f38ba8; }
     .main { display: flex; flex: 1; overflow: hidden; }
     .sidebar { display: flex; background: #181825; border-right: 1px solid #313244; }
     .sidebar-icons { display: flex; flex-direction: column; gap: 2px; padding: 4px; }
@@ -157,25 +258,42 @@ type WsCustomMessage {
 
 /// WebSocket connection state.
 type WsState {
-  WsState(agent: Subject(AgentMessage), update_subject: Subject(String))
+  WsState(
+    agent: Subject(AgentMessage),
+    tree: Subject(AgentTreeMessage),
+    registry: Subject(RegistryMessage),
+    update_subject: Subject(String),
+  )
 }
 
 fn upgrade_websocket(
   req: request.Request(mist.Connection),
-  agent: Subject(AgentMessage),
+  tree: Subject(AgentTreeMessage),
+  registry: Subject(RegistryMessage),
+  agent_id: String,
 ) -> response.Response(mist.ResponseData) {
-  mist.websocket(
-    request: req,
-    handler: fn(state, msg, conn) {
-      handle_ws_message(state: state, msg: msg, conn: conn)
-    },
-    on_init: fn(conn) { ws_init(agent, conn) },
-    on_close: fn(state) { ws_close(state) },
-  )
+  case agent_tree.get_agent(tree: tree, id: agent_id) {
+    Error(_) ->
+      response.new(404)
+      |> response.set_body(
+        mist.Bytes(bytes_tree.from_string("Agent not found: " <> agent_id)),
+      )
+    Ok(agent_subject) ->
+      mist.websocket(
+        request: req,
+        handler: fn(state, msg, conn) {
+          handle_ws_message(state: state, msg: msg, conn: conn)
+        },
+        on_init: fn(conn) { ws_init(agent_subject, tree, registry, conn) },
+        on_close: fn(state) { ws_close(state) },
+      )
+  }
 }
 
 fn ws_init(
   agent_subject: Subject(AgentMessage),
+  tree: Subject(AgentTreeMessage),
+  registry: Subject(RegistryMessage),
   conn: mist.WebsocketConnection,
 ) -> #(WsState, Option(process.Selector(WsCustomMessage))) {
   // Create a subject for receiving state updates from the agent
@@ -189,17 +307,27 @@ fn ws_init(
   // Subscribe to agent updates
   agent.subscribe(subject: agent_subject, subscriber: update_subject)
 
+  // Register with the broadcast registry
+  registry_register(registry, update_subject)
+
   // Send initial state events so panels are populated immediately
   let initial_state =
     agent.get_current_state(subject: agent_subject, timeout: 5000)
   let _sent = mist.send_text_frame(conn, initial_state)
 
-  let state = WsState(agent: agent_subject, update_subject: update_subject)
+  let state =
+    WsState(
+      agent: agent_subject,
+      tree: tree,
+      registry: registry,
+      update_subject: update_subject,
+    )
   #(state, Some(selector))
 }
 
 fn ws_close(state: WsState) -> Nil {
   agent.unsubscribe(subject: state.agent, subscriber: state.update_subject)
+  registry_unregister(state.registry, state.update_subject)
 }
 
 fn handle_ws_message(
@@ -231,11 +359,59 @@ fn handle_client_message(state state: WsState, text text: String) -> Nil {
       agent.send_message(subject: state.agent, text: text)
       Nil
     }
+    Ok(protocol.SpawnAgent(id:, label:, system_prompt:)) -> {
+      handle_spawn_agent(state, id, label, system_prompt)
+    }
     Ok(command) -> {
       // Map other ClientCommands to widget events
       dispatch_client_command(state, command)
     }
     Error(_) -> Nil
+  }
+}
+
+fn handle_spawn_agent(
+  state: WsState,
+  id: String,
+  label: String,
+  system_prompt: String,
+) -> Nil {
+  let override =
+    agent.AgentConfigOverride(
+      model: None,
+      api_base: None,
+      system_prompt: Some(system_prompt),
+    )
+  case
+    agent_tree.spawn_child(
+      tree: state.tree,
+      id: id,
+      label: label,
+      override: override,
+    )
+  {
+    Ok(_) -> {
+      // Broadcast updated agent list to all connected clients
+      let agents = agent_tree.list_agents(tree: state.tree)
+      let event = protocol.AgentListChanged(agents: agents)
+      let payload = protocol.server_events_to_json_string([event])
+      registry_broadcast(state.registry, payload)
+    }
+    Error(agent_tree.ChildAlreadyExists(..)) -> {
+      // Send error only to the requesting client
+      let event =
+        protocol.AgentSpawnFailed(id: id, reason: "Agent already exists")
+      let payload = protocol.server_events_to_json_string([event])
+      process.send(state.update_subject, payload)
+      Nil
+    }
+    Error(agent_tree.ChildStartFailed(..)) -> {
+      let event =
+        protocol.AgentSpawnFailed(id: id, reason: "Failed to start agent")
+      let payload = protocol.server_events_to_json_string([event])
+      process.send(state.update_subject, payload)
+      Nil
+    }
   }
 }
 
@@ -328,8 +504,8 @@ fn dispatch_client_command(
         "close_read_file",
         "{\"path\": " <> json.to_string(json.string(path)) <> "}",
       ))
-    // SendUserMessage is handled above, should not reach here
-    protocol.SendUserMessage(..) -> Error(Nil)
+    // SendUserMessage and SpawnAgent are handled above
+    protocol.SendUserMessage(..) | protocol.SpawnAgent(..) -> Error(Nil)
   }
   case result {
     Ok(#(event_name, args_json)) -> {

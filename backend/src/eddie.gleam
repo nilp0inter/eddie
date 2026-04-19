@@ -3,6 +3,7 @@ import gleam/int
 import gleam/result
 
 import eddie/agent
+import eddie/agent_tree
 import eddie/llm
 import eddie/server
 
@@ -25,6 +26,7 @@ pub fn main() -> Nil {
 
   let config =
     agent.AgentConfig(
+      agent_id: "root",
       llm_config: llm.LlmConfig(
         api_base: api_base,
         api_key: api_key,
@@ -33,10 +35,10 @@ pub fn main() -> Nil {
       system_prompt: default_system_prompt(),
     )
 
-  let assert Ok(agent_subject) = agent.start(config: config)
+  let assert Ok(tree) = agent_tree.start(config: config)
 
   let server_config = server.ServerConfig(port: port)
-  let assert Ok(_) = server.start(config: server_config, agent: agent_subject)
+  let assert Ok(_) = server.start(config: server_config, tree: tree)
 
   process.sleep_forever()
 }

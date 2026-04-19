@@ -54,7 +54,9 @@ The agent's context is composed from a tree of widgets, orchestrated by the **Co
 
 ## Hierarchical agents
 
-Eddie supports multi-agent hierarchies through `AgentTree`. A tree starts with a root agent and can spawn child agents with config overrides (model, API base, system prompt). Each child is an independent OTP actor with its own context and turn loop. API keys are always inherited from the parent.
+Eddie supports multi-agent hierarchies through `AgentTree`, itself an OTP actor that manages a root agent and dynamically spawned children. Each agent has an `agent_id` and a human-readable label. Children inherit the parent's config with optional overrides (model, API base, system prompt); API keys are always inherited.
+
+The server routes WebSocket connections per agent (`/ws/<agent_id>`), and a `GET /agents` endpoint returns the list of available agents as `AgentInfo` records. The Lustre SPA displays an agent tab bar for switching between agents and an inline form for spawning new ones at runtime via the `SpawnAgent` client command.
 
 ## Context compositor and LLM bridge
 

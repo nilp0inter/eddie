@@ -1,6 +1,6 @@
-import gleam/dict
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
+import gleam/list
 import gleam/option.{None, Some}
 import gleeunit/should
 
@@ -15,6 +15,7 @@ import eddie/llm
 
 fn test_config() -> agent.AgentConfig {
   agent.AgentConfig(
+    agent_id: "root",
     llm_config: llm.LlmConfig(
       api_base: "https://test.example.com/v1",
       api_key: "test-key",
@@ -91,15 +92,20 @@ pub fn spawn_child_test() {
       system_prompt: Some("You are a child assistant."),
     )
 
-  let assert Ok(tree) =
-    agent_tree.spawn_child(tree: tree, id: "child-1", override: override)
+  agent_tree.spawn_child(
+    tree: tree,
+    id: "child-1",
+    label: "Child 1",
+    override: override,
+  )
+  |> should.be_ok
 
   // Child should be accessible
-  agent_tree.get_child(tree: tree, id: "child-1")
+  agent_tree.get_agent(tree: tree, id: "child-1")
   |> should.be_ok
 
   // Child should be usable
-  let assert Ok(child) = agent_tree.get_child(tree: tree, id: "child-1")
+  let assert Ok(child) = agent_tree.get_agent(tree: tree, id: "child-1")
   let result =
     agent.run_turn(subject: child, text: "Hello child", timeout: 10_000)
   case result {
@@ -121,12 +127,22 @@ pub fn spawn_duplicate_child_fails_test() {
   let override =
     agent.AgentConfigOverride(model: None, api_base: None, system_prompt: None)
 
-  let assert Ok(tree) =
-    agent_tree.spawn_child(tree: tree, id: "child-1", override: override)
+  agent_tree.spawn_child(
+    tree: tree,
+    id: "child-1",
+    label: "Child 1",
+    override: override,
+  )
+  |> should.be_ok
 
   // Spawning same ID again should fail
   let result =
-    agent_tree.spawn_child(tree: tree, id: "child-1", override: override)
+    agent_tree.spawn_child(
+      tree: tree,
+      id: "child-1",
+      label: "Child 1",
+      override: override,
+    )
   case result {
     Error(agent_tree.ChildAlreadyExists(id)) -> id |> should.equal("child-1")
     _ -> should.fail()
@@ -140,11 +156,23 @@ pub fn get_nonexistent_child_fails_test() {
       send_fn: mock_send_fn(),
     )
 
-  agent_tree.get_child(tree: tree, id: "nonexistent")
+  agent_tree.get_agent(tree: tree, id: "nonexistent")
   |> should.be_error
 }
 
-pub fn children_returns_all_children_test() {
+pub fn get_root_by_id_test() {
+  let assert Ok(tree) =
+    agent_tree.start_with_send_fn(
+      config: test_config(),
+      send_fn: mock_send_fn(),
+    )
+
+  // "root" should return the root agent
+  agent_tree.get_agent(tree: tree, id: "root")
+  |> should.be_ok
+}
+
+pub fn list_agents_test() {
   let assert Ok(tree) =
     agent_tree.start_with_send_fn(
       config: test_config(),
@@ -154,18 +182,29 @@ pub fn children_returns_all_children_test() {
   let override =
     agent.AgentConfigOverride(model: None, api_base: None, system_prompt: None)
 
-  let assert Ok(tree) =
-    agent_tree.spawn_child(tree: tree, id: "child-a", override: override)
-  let assert Ok(tree) =
-    agent_tree.spawn_child(tree: tree, id: "child-b", override: override)
+  let assert Ok(_) =
+    agent_tree.spawn_child(
+      tree: tree,
+      id: "child-a",
+      label: "Agent A",
+      override: override,
+    )
+  let assert Ok(_) =
+    agent_tree.spawn_child(
+      tree: tree,
+      id: "child-b",
+      label: "Agent B",
+      override: override,
+    )
 
-  let kids = agent_tree.children(tree: tree)
-  dict.size(kids)
-  |> should.equal(2)
-  dict.has_key(kids, "child-a")
-  |> should.be_true
-  dict.has_key(kids, "child-b")
-  |> should.be_true
+  let agents = agent_tree.list_agents(tree: tree)
+  list.length(agents)
+  |> should.equal(3)
+
+  // Root should be first
+  let assert Ok(first) = list.first(agents)
+  first.id
+  |> should.equal("root")
 }
 
 // ============================================================================
@@ -181,7 +220,10 @@ pub fn merge_config_full_override_test() {
       system_prompt: Some("New system prompt"),
     )
 
-  let child = agent.merge_config(parent: parent, override: override)
+  let child =
+    agent.merge_config(parent: parent, child_id: "child-1", override: override)
+  child.agent_id
+  |> should.equal("child-1")
   child.llm_config.model
   |> should.equal("new-model")
   child.llm_config.api_base
@@ -202,7 +244,8 @@ pub fn merge_config_partial_override_test() {
       system_prompt: None,
     )
 
-  let child = agent.merge_config(parent: parent, override: override)
+  let child =
+    agent.merge_config(parent: parent, child_id: "child-1", override: override)
   child.llm_config.model
   |> should.equal("different-model")
   // These should inherit from parent
@@ -217,7 +260,8 @@ pub fn merge_config_no_override_test() {
   let override =
     agent.AgentConfigOverride(model: None, api_base: None, system_prompt: None)
 
-  let child = agent.merge_config(parent: parent, override: override)
+  let child =
+    agent.merge_config(parent: parent, child_id: "child-1", override: override)
   child.llm_config.model
   |> should.equal("test-model")
   child.llm_config.api_base
