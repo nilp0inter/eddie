@@ -7,63 +7,65 @@ A harness for ralph loops, written in Gleam.
 All commands run inside the Nix devShell. Use `task` (go-task):
 
 ```sh
-task build:local     # gleam build
-task tests:unit      # gleam test (depends on build)
-task format          # gleam format src/ test/
-task format:check    # gleam format --check (CI)
+# Project-wide
+task build:local     # build all packages
+task test:unit       # run all tests
+task format          # format all packages
+task format:check    # check formatting (CI)
 task lint            # format check + glinter
+
+# Per-component (shared, backend, frontend)
+task shared:build          task shared:test:unit
+task backend:build         task backend:test:unit
+task frontend:build
+task <component>:format    task <component>:format:check
+task backend:lint
+
+# Docs
 task docs:build      # mdbook build (in docs/)
 task docs:serve      # mdbook serve --open
 ```
 
 ### Workflow order
 
-1. `gleam test` — fix until green
-2. `gleam run -m glinter` — fix until clean
-3. `gleam format src/ test/` — only once, at the end
+1. `task test:unit` — fix until green
+2. `task backend:lint` — fix until clean
+3. `task format` — only once, at the end
 
-Never format before tests and lint pass. Always scope format to `src/` and `test/`.
+Never format before tests and lint pass.
 
 ## Project Structure
 
 ```
-src/
-  eddie.gleam          Entry point (env config, start agent + server)
-  eddie/
-    agent.gleam        OTP actor: turn loop, subscriber notifications
-    agent_tree.gleam   Hierarchical agent management (parent-child)
-    server.gleam       mist HTTP + WebSocket server
-    frontend.gleam     Browser UI template (HTML/CSS/JS)
-    cmd.gleam          Cmd(msg) side-effect descriptors, Initiator type
-    message.gleam      MessagePart, Message types, glopenai conversion
-    tool.gleam         ToolDefinition type, glopenai conversion
-    widget.gleam       WidgetConfig, WidgetHandle (type-erased), Cmd loop
-    context.gleam      Context compositor, tool dispatch, protocol enforcement
-    llm.gleam          Sans-IO LLM client bridge (glopenai)
-    http.gleam         HTTP execution layer (gleam_httpc)
-    coerce.gleam       Unsafe type coercion for type erasure boundary
-    widgets/
-      system_prompt.gleam    System prompt identity text
-      conversation_log.gleam Task-partitioned conversation history
-      task_protocol.gleam    Task types, protocol rules, enforcement
-      goal.gleam             Protocol-free goal tracking
-      file_explorer.gleam    Filesystem navigation (CmdEffect IO)
-      token_usage.gleam      Display-only token tracking
-  eddie_ffi.erl        Erlang FFI (identity, get_env)
-test/
-  eddie/
-    cmd_test.gleam
-    message_test.gleam
-    tool_test.gleam
-    widget_test.gleam
-    context_test.gleam
-    llm_test.gleam
-    agent_test.gleam
-    agent_tree_test.gleam
-    goal_test.gleam
-    file_explorer_test.gleam
-    token_usage_test.gleam
-    task_protocol_test.gleam
+shared/                Gleam package: cross-target types and codecs
+  src/eddie_shared/    Initiator, Message, Task, Tool, TurnResult, Protocol
+backend/               Gleam package (Erlang target): server + agent
+  src/
+    eddie.gleam          Entry point (env config, start agent + server)
+    eddie/
+      agent.gleam        OTP actor: turn loop, subscriber notifications
+      agent_tree.gleam   Hierarchical agent management (parent-child)
+      server.gleam       mist HTTP + WebSocket server
+      frontend.gleam     Browser UI template (HTML/CSS/JS)
+      cmd.gleam          Cmd(msg) side-effect descriptors, Initiator type
+      message.gleam      MessagePart, Message types, glopenai conversion
+      tool.gleam         ToolDefinition type, glopenai conversion
+      widget.gleam       WidgetConfig, WidgetHandle (type-erased), Cmd loop
+      context.gleam      Context compositor, tool dispatch, protocol enforcement
+      llm.gleam          Sans-IO LLM client bridge (glopenai)
+      http.gleam         HTTP execution layer (gleam_httpc)
+      coerce.gleam       Unsafe type coercion for type erasure boundary
+      widgets/
+        system_prompt.gleam    System prompt identity text
+        conversation_log.gleam Task-partitioned conversation history
+        task_protocol.gleam    Task types, protocol rules, enforcement
+        goal.gleam             Protocol-free goal tracking
+        file_explorer.gleam    Filesystem navigation (CmdEffect IO)
+        token_usage.gleam      Display-only token tracking
+    eddie_ffi.erl        Erlang FFI (identity, get_env)
+  test/                  164 tests (gleeunit)
+frontend/              Gleam package (JavaScript target): Lustre SPA
+  src/eddie_frontend.gleam   Entry point (stub)
 reference/             Read-only reference implementations
   calipso/             Python reference (Elm-architecture widgets)
   glopenai/            Gleam OpenAI client (published on hex.pm)
@@ -71,7 +73,7 @@ reference/             Read-only reference implementations
   pydantic-ai/         Structured output spec
 docs/                  mdBook documentation site
 flake.nix              Two-tier Nix devShell (ci + default)
-Taskfile.yml           All automation
+Taskfile.yml           All automation (component:target pattern)
 PLAN.md                Phased implementation plan
 ```
 

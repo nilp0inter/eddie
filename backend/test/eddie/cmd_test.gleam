@@ -14,14 +14,12 @@ pub fn cmd_tool_result_test() {
 }
 
 pub fn for_initiator_llm_returns_tool_result_test() {
-  let result: cmd.Cmd(String) =
-    cmd.for_initiator(initiator: LLM, text: "done")
+  let result: cmd.Cmd(String) = cmd.for_initiator(initiator: LLM, text: "done")
   let assert cmd.CmdToolResult(text) = result
   text |> should.equal("done")
 }
 
 pub fn for_initiator_ui_returns_none_test() {
-  let result: cmd.Cmd(String) =
-    cmd.for_initiator(initiator: UI, text: "done")
+  let result: cmd.Cmd(String) = cmd.for_initiator(initiator: UI, text: "done")
   let assert cmd.CmdNone = result
 }

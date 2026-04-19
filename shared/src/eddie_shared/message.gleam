@@ -2,7 +2,6 @@
 ///
 /// Widgets produce and consume these types. The backend's LLM client
 /// handles conversion to/from the wire format (glopenai).
-
 /// A single piece of content within a message.
 pub type MessagePart {
   /// System-level instruction (only in requests)

@@ -7,8 +7,8 @@ import gleam/string
 import gleeunit/should
 
 import eddie/llm
-import eddie_shared/message
 import eddie/tool
+import eddie_shared/message
 
 // ============================================================================
 // Tests: build_request

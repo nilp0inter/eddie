@@ -11,11 +11,11 @@ import lustre/element/html
 
 import eddie/cmd
 import eddie/context
-import eddie_shared/message
 import eddie/tool
 import eddie/widget
 import eddie/widgets/conversation_log
 import eddie/widgets/system_prompt
+import eddie_shared/message
 
 // ============================================================================
 // Helpers

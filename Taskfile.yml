@@ -12,38 +12,134 @@ output:
     end: '::endgroup::'
 
 tasks:
-  build:local:
-    desc: Build the project
+  # ── Shared ──────────────────────────────────────────────────────────
+  shared:build:
+    desc: Build the shared package
+    dir: shared
     cmds:
       - gleam build
     sources:
       - src/**/*.gleam
       - gleam.toml
 
-  format:
-    desc: Auto-format all Gleam source files
-    cmds:
-      - gleam format
-
-  format:check:
-    desc: Check formatting without modifying files
-    cmds:
-      - gleam format --check
-
-  lint:
-    desc: Lint the project (format check + glinter)
+  shared:test:unit:
+    desc: Run shared tests
+    dir: shared
     deps:
-      - format:check
-    cmds:
-      - gleam run -m glinter
-
-  tests:unit:
-    desc: Run all tests
-    deps:
-      - build:local
+      - shared:build
     cmds:
       - gleam test
 
+  shared:format:
+    desc: Format shared source files
+    dir: shared
+    cmds:
+      - gleam format
+
+  shared:format:check:
+    desc: Check shared formatting
+    dir: shared
+    cmds:
+      - gleam format --check
+
+  # ── Backend ─────────────────────────────────────────────────────────
+  backend:build:
+    desc: Build the backend
+    dir: backend
+    deps:
+      - shared:build
+    cmds:
+      - gleam build
+    sources:
+      - src/**/*.gleam
+      - gleam.toml
+
+  backend:test:unit:
+    desc: Run backend tests
+    dir: backend
+    deps:
+      - backend:build
+    cmds:
+      - gleam test
+
+  backend:format:
+    desc: Format backend source files
+    dir: backend
+    cmds:
+      - gleam format
+
+  backend:format:check:
+    desc: Check backend formatting
+    dir: backend
+    cmds:
+      - gleam format --check
+
+  backend:lint:
+    desc: Lint the backend (format check + glinter)
+    dir: backend
+    deps:
+      - backend:format:check
+    cmds:
+      - gleam run -m glinter
+
+  # ── Frontend ────────────────────────────────────────────────────────
+  frontend:build:
+    desc: Build the frontend
+    dir: frontend
+    deps:
+      - shared:build
+    cmds:
+      - gleam build
+    sources:
+      - src/**/*.gleam
+      - gleam.toml
+
+  frontend:format:
+    desc: Format frontend source files
+    dir: frontend
+    cmds:
+      - gleam format
+
+  frontend:format:check:
+    desc: Check frontend formatting
+    dir: frontend
+    cmds:
+      - gleam format --check
+
+  # ── Project-wide ────────────────────────────────────────────────────
+  build:local:
+    desc: Build all packages
+    deps:
+      - backend:build
+      - frontend:build
+
+  test:unit:
+    desc: Run all tests
+    deps:
+      - shared:test:unit
+      - backend:test:unit
+
+  format:
+    desc: Format all source files
+    deps:
+      - shared:format
+      - backend:format
+      - frontend:format
+
+  format:check:
+    desc: Check formatting across all packages
+    deps:
+      - shared:format:check
+      - backend:format:check
+      - frontend:format:check
+
+  lint:
+    desc: Lint all packages
+    deps:
+      - format:check
+      - backend:lint
+
+  # ── Docs ────────────────────────────────────────────────────────────
   docs:build:
     desc: Build documentation site
     dir: docs

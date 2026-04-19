@@ -21,8 +21,8 @@ import lustre/element.{type Element}
 
 import eddie/tool.{type ToolDefinition}
 import eddie/widget.{type WidgetHandle}
-import eddie_shared/message.{type Message}
 import eddie/widgets/conversation_log.{type ConversationLog}
+import eddie_shared/message.{type Message}
 
 /// The root context compositor.
 pub opaque type Context {

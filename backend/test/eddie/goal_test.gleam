@@ -4,8 +4,8 @@ import gleam/option.{None, Some}
 import gleam/set
 import gleeunit/should
 
-import eddie_shared/message
 import eddie/widget
+import eddie_shared/message
 
 import eddie/widgets/goal
 

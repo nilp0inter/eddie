@@ -31,7 +31,9 @@ import eddie/widget.{type WidgetHandle}
 import eddie/widgets/task_protocol
 import eddie_shared/initiator.{type Initiator, LLM, UI}
 import eddie_shared/message.{type Message}
-import eddie_shared/task.{type Task, type TaskStatus, Done, InProgress, Pending, Task}
+import eddie_shared/task.{
+  type Task, type TaskStatus, Done, InProgress, Pending, Task,
+}
 
 // ============================================================================
 // Supporting types

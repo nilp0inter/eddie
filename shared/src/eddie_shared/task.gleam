@@ -2,7 +2,6 @@
 ///
 /// These are pure data types — the protocol rules and enforcement logic
 /// live in the backend.
-
 pub type TaskStatus {
   Pending
   InProgress

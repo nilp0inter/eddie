@@ -7,8 +7,8 @@ import gleam/set
 import gleam/string
 import gleeunit/should
 
-import eddie_shared/message
 import eddie/widget
+import eddie_shared/message
 
 import eddie/widgets/file_explorer
 

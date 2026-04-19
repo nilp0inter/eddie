@@ -9,7 +9,9 @@ import gleam/option.{type Option, None, Some}
 
 import eddie/message as message_conv
 import eddie/tool.{type ToolDefinition}
-import eddie_shared/message.{type Message, Response as MessageResponse, TextPart, ToolCallPart}
+import eddie_shared/message.{
+  type Message, Response as MessageResponse, TextPart, ToolCallPart,
+}
 import glopenai/chat
 import glopenai/config
 import glopenai/error

@@ -12,10 +12,10 @@ import lustre/element.{type Element}
 import lustre/element/html
 
 import eddie/cmd.{type Cmd}
-import eddie_shared/initiator.{type Initiator, LLM, UI}
-import eddie_shared/message.{type Message}
 import eddie/tool.{type ToolDefinition}
 import eddie/widget.{type WidgetHandle}
+import eddie_shared/initiator.{type Initiator, LLM, UI}
+import eddie_shared/message.{type Message}
 
 // ============================================================================
 // Model

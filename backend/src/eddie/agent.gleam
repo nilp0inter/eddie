@@ -23,13 +23,13 @@ import eddie/coerce
 import eddie/context.{type Context}
 import eddie/http as eddie_http
 import eddie/llm.{type LlmConfig}
-import eddie_shared/message.{type Message}
 import eddie/widget
 import eddie/widgets/conversation_log as eddie_conversation_log
 import eddie/widgets/file_explorer as eddie_file_explorer
 import eddie/widgets/goal as eddie_goal
 import eddie/widgets/system_prompt as eddie_system_prompt
 import eddie/widgets/token_usage as eddie_token_usage
+import eddie_shared/message.{type Message}
 
 import lustre/element
 

@@ -4,10 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - 'src/**'
-      - 'test/**'
+      - 'shared/**'
+      - 'backend/**'
+      - 'frontend/**'
       - 'docs/**'
-      - 'gleam.toml'
       - 'Taskfile.yml'
       - 'flake.nix'
       - 'flake.lock'
@@ -32,9 +32,9 @@ jobs:
         with:
           filters: |
             code:
-              - 'src/**'
-              - 'test/**'
-              - 'gleam.toml'
+              - 'shared/**'
+              - 'backend/**'
+              - 'frontend/**'
               - 'Taskfile.yml'
               - 'flake.nix'
               - 'flake.lock'
@@ -80,7 +80,7 @@ jobs:
 
       - name: Run tests
         if: steps.changes.outputs.code == 'true'
-        run: nix develop .#ci --command task tests:unit
+        run: nix develop .#ci --command task test:unit
 
       - name: Build documentation
         if: steps.changes.outputs.docs == 'true'

@@ -20,8 +20,8 @@ import lustre/element.{type Element}
 
 import eddie/cmd.{type Cmd, CmdEffect, CmdNone, CmdToolResult}
 import eddie/coerce
-import eddie_shared/message.{type Message}
 import eddie/tool.{type ToolDefinition}
+import eddie_shared/message.{type Message}
 
 /// Configuration for creating a widget. All functions are required except
 /// where defaults make sense (e.g. a widget with no tools).

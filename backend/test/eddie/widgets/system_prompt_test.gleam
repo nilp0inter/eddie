@@ -5,9 +5,9 @@ import gleam/string
 import gleeunit/should
 
 import eddie/coerce
-import eddie_shared/message
 import eddie/widget
 import eddie/widgets/system_prompt
+import eddie_shared/message
 
 // ============================================================================
 // Helpers

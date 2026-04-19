@@ -3,10 +3,10 @@ import gleam/string
 import gleeunit/should
 
 import eddie/llm
-import eddie_shared/message
 import eddie/structured_output.{
   type OutputSchema, NativeStrategy, OutputSchema, ToolCallStrategy,
 }
+import eddie_shared/message
 import sextant
 
 // ============================================================================

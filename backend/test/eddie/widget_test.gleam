@@ -8,9 +8,9 @@ import lustre/element/html
 
 import eddie/cmd
 import eddie/coerce
-import eddie_shared/message
 import eddie/tool
 import eddie/widget
+import eddie_shared/message
 
 // ============================================================================
 // A minimal test widget: a counter with increment/decrement
