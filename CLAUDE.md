@@ -17,7 +17,7 @@ task lint            # format check + glinter
 # Per-component (shared, backend, frontend)
 task shared:build          task shared:test:unit
 task backend:build         task backend:test:unit
-task frontend:build
+task frontend:build        task frontend:bundle
 task <component>:format    task <component>:format:check
 task backend:lint
 
@@ -39,14 +39,14 @@ Never format before tests and lint pass.
 ```
 shared/                Gleam package: cross-target types and codecs
   src/eddie_shared/    Initiator, Message, Task, Tool, TurnResult, Protocol
+  test/                45 tests (roundtrip codec tests)
 backend/               Gleam package (Erlang target): server + agent
   src/
     eddie.gleam          Entry point (env config, start agent + server)
     eddie/
       agent.gleam        OTP actor: turn loop, subscriber notifications
       agent_tree.gleam   Hierarchical agent management (parent-child)
-      server.gleam       mist HTTP + WebSocket server
-      frontend.gleam     Browser UI template (HTML/CSS/JS)
+      server.gleam       mist HTTP + WebSocket server, serves Lustre SPA
       cmd.gleam          Cmd(msg) side-effect descriptors, Initiator type
       message.gleam      MessagePart, Message types, glopenai conversion
       tool.gleam         ToolDefinition type, glopenai conversion
@@ -65,7 +65,10 @@ backend/               Gleam package (Erlang target): server + agent
     eddie_ffi.erl        Erlang FFI (identity, get_env)
   test/                  164 tests (gleeunit)
 frontend/              Gleam package (JavaScript target): Lustre SPA
-  src/eddie_frontend.gleam   Entry point (stub)
+  src/
+    eddie_frontend.gleam     Lustre app (Model, Msg, init, update, view)
+    eddie_frontend_ffi.mjs   JS FFI (setTimeout, scrollToBottom)
+  entrypoint.mjs         esbuild entrypoint
 reference/             Read-only reference implementations
   calipso/             Python reference (Elm-architecture widgets)
   glopenai/            Gleam OpenAI client (published on hex.pm)

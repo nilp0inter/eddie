@@ -53,9 +53,9 @@ After each state mutation (user message added, response recorded, tool calls dis
 
 During tool dispatch, the agent sends `ToolCallStarted` and `ToolCallCompleted` `ServerEvent`s to subscribers, giving visibility into the agent's actions during a turn. `TurnStarted` and `TurnCompleted` are also broadcast through the subscriber mechanism. All notifications use the same JSON-encoded `ServerEvent` list format defined in `eddie_shared/protocol`.
 
-### `eddie/server` and `eddie/frontend`
+### `eddie/server`
 
-Mist HTTP and WebSocket server (`server.gleam`) plus a minimal browser frontend (`frontend.gleam`). The server is thin glue between the browser and the agent actor; the frontend module holds a temporary event-logging page that displays raw JSON domain events (a Lustre SPA is planned for Phase 4).
+Mist HTTP and WebSocket server. The server is thin glue between the Lustre SPA frontend and the agent actor. It serves the HTML shell and bundled frontend JS, and relays `ClientCommand` JSON over WebSocket.
 
 - **`ServerConfig(port)`** — listening port configuration
 - **`start(config, agent)`** — starts mist, returns `Result(Started(Supervisor), StartError)`
@@ -64,7 +64,8 @@ Mist HTTP and WebSocket server (`server.gleam`) plus a minimal browser frontend 
 
 | Method | Path | Behaviour |
 |---|---|---|
-| `GET` | `/` | Serves the event-logging frontend |
+| `GET` | `/` | Serves the HTML shell (`<div id="app">` + `<script src="/app.js">`) |
+| `GET` | `/app.js` | Serves the bundled Lustre SPA JS (read from `../frontend/build/app.js` via simplifile) |
 | `GET` | `/ws` | WebSocket upgrade |
 | `*` | `*` | 404 |
 
@@ -74,10 +75,12 @@ Each WebSocket connection is a separate BEAM process. On init, it creates a Subj
 
 *Client → Server messages (JSON over WebSocket):*
 
-| Key | Payload | Effect |
-|---|---|---|
-| `user_input` | `{"user_input": "text"}` | Calls `agent.send_message` (fire-and-forget) |
-| `widget_event` | `{"widget_event": {"event_name": "...", "args_json": "..."}}` | Forwards to `agent.dispatch_event` |
+The frontend sends `ClientCommand` JSON (defined in `eddie_shared/protocol`). Each command has a `"type"` field. The server parses these via `protocol.client_command_decoder()`:
+
+| Command type | Effect |
+|---|---|
+| `send_user_message` | Calls `agent.send_message` (fire-and-forget) |
+| All other commands | Mapped to widget event dispatch via `agent.dispatch_event` |
 
 Turn lifecycle events (`TurnStarted`, `TurnCompleted`) flow through the subscriber mechanism — the server does not need to track turn state separately.
 
@@ -87,6 +90,7 @@ All server-to-client messages are JSON-encoded arrays of `ServerEvent` objects (
 
 | Event type | Purpose |
 |---|---|
+| `agent_state_snapshot` | Full state snapshot sent on initial connect |
 | `system_prompt_updated` | System prompt text changed |
 | `goal_updated` | Goal set or cleared |
 | `tokens_used` | Token usage for a request |
@@ -97,11 +101,18 @@ All server-to-client messages are JSON-encoded arrays of `ServerEvent` objects (
 | `turn_started`, `turn_completed` | Turn lifecycle (thinking indicator) |
 | `agent_error` | Unrecoverable agent error |
 
-**Frontend template (`eddie/frontend`):**
+### Lustre SPA frontend (`eddie_frontend`)
 
-The `frontend.index_html()` function returns a minimal event-logging page. It connects via WebSocket, parses incoming JSON `ServerEvent` arrays, and displays each event with its type tag in a scrollable log. A text input allows sending user messages. This is a temporary stub — the full UI will be a Lustre SPA (Phase 4).
+Single-module Lustre application (`frontend/src/eddie_frontend.gleam`) that renders the chat UI and sidebar panels. Compiled to JavaScript and bundled with esbuild.
 
-No build step, no external dependencies.
+- **WebSocket:** uses `lustre_websocket` to connect to `/ws`, auto-reconnects on disconnect
+- **Model:** holds connection status, agent state (goal, tasks, conversation log, files, token records), chat input, thinking indicator, active tool calls, and active sidebar panel
+- **Update:** folds all `ServerEvent`s from a WebSocket message into the model in a single update cycle (one re-render per message batch). `AgentStateSnapshot` replaces all model fields; incremental events update individual fields
+- **View:** top bar (connection status) + main area (sidebar left, chat right) + input bar
+- **Chat view:** user messages, assistant responses with tool call badges, collapsible tool results, thinking indicator with pulsing animation
+- **Sidebar panels:** Goal, Tasks (with status icons and memories), Files (directory tree), Token Usage (totals and request count)
+- **Theme:** Catppuccin Mocha dark theme via CSS in the HTML shell
+- **Build:** `task frontend:bundle` runs `gleam build` then `esbuild` to produce `frontend/build/app.js`
 
 ### `eddie` (entry point)
 

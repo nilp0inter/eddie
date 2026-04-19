@@ -1,6 +1,6 @@
 # Client-side markdown rendering over server-side
 
-> **Superseded.** Phase 2 replaced the inline HTML/JS frontend with a minimal event-logging stub. The regex-based markdown renderer no longer exists. Markdown rendering will be revisited when the Lustre SPA frontend is built in Phase 4.
+> **Superseded.** Phase 2 removed the inline HTML/JS frontend and its regex-based markdown renderer. Phase 4 built the Lustre SPA without markdown rendering — LLM response text is displayed as plain text with `white-space: pre-wrap`. A proper markdown library is deferred until it becomes a priority.
 
 **The decision.** LLM response text was rendered as HTML by a minimal regex-based markdown parser in the frontend JavaScript, rather than being converted server-side in Gleam before sending over WebSocket.
 
@@ -14,7 +14,7 @@ Two approaches were considered:
 
 ## Why it was superseded
 
-Phase 2 replaced the entire inline HTML/JS frontend with a minimal event-logging stub that displays raw JSON events. The regex-based markdown renderer was removed along with the rest of the frontend JavaScript. When the Lustre SPA frontend is built (Phase 4), markdown rendering will be implemented in client-side Gleam code, likely using a proper library that compiles to JavaScript.
+Phase 2 replaced the entire inline HTML/JS frontend with a minimal event-logging stub. Phase 4 built a Lustre SPA that renders LLM responses as plain text. The Lustre SPA could integrate a Gleam or JS markdown library in the future, but this is not yet implemented.
 
 ## What it cost (historical)
 
@@ -24,4 +24,4 @@ Phase 2 replaced the entire inline HTML/JS frontend with a minimal event-logging
 
 ## What made us reconsider
 
-The Phase 2 removal of the inline HTML frontend made this trade-off moot. The rendering concern remains for Phase 4 but will be addressed with different technology (Lustre SPA with a Gleam markdown library).
+The Phase 2 removal of the inline HTML frontend made this trade-off moot. The Phase 4 Lustre SPA currently displays plain text — markdown rendering remains a future enhancement.

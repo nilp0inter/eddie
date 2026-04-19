@@ -6,6 +6,7 @@
 /// Both user and LLM are external to the agent — they interact with it
 /// through these message types. The user and LLM are nearly equal partners
 /// when interacting with the agent's state.
+import gleam/dynamic/decode
 import gleam/json
 import gleam/option.{type Option, None, Some}
 
@@ -343,4 +344,350 @@ pub fn server_event_to_json(event: ServerEvent) -> json.Json {
 /// Encode a list of server events to a JSON string.
 pub fn server_events_to_json_string(events: List(ServerEvent)) -> String {
   json.to_string(json.array(events, server_event_to_json))
+}
+
+// ============================================================================
+// ClientCommand JSON encoding
+// ============================================================================
+
+pub fn client_command_to_json(command: ClientCommand) -> json.Json {
+  case command {
+    SendUserMessage(text) ->
+      json.object([
+        #("type", json.string("send_user_message")),
+        #("text", json.string(text)),
+      ])
+    SetGoal(text) ->
+      json.object([
+        #("type", json.string("set_goal")),
+        #("text", json.string(text)),
+      ])
+    ClearGoal -> json.object([#("type", json.string("clear_goal"))])
+    SetSystemPrompt(text) ->
+      json.object([
+        #("type", json.string("set_system_prompt")),
+        #("text", json.string(text)),
+      ])
+    ResetSystemPrompt ->
+      json.object([#("type", json.string("reset_system_prompt"))])
+    CreateTask(description) ->
+      json.object([
+        #("type", json.string("create_task")),
+        #("description", json.string(description)),
+      ])
+    StartTask(task_id) ->
+      json.object([
+        #("type", json.string("start_task")),
+        #("task_id", json.int(task_id)),
+      ])
+    CloseCurrentTask ->
+      json.object([#("type", json.string("close_current_task"))])
+    TaskMemoryCmd(text) ->
+      json.object([
+        #("type", json.string("task_memory_cmd")),
+        #("text", json.string(text)),
+      ])
+    PickTask(task_id) ->
+      json.object([
+        #("type", json.string("pick_task")),
+        #("task_id", json.int(task_id)),
+      ])
+    RemoveTask(task_id) ->
+      json.object([
+        #("type", json.string("remove_task")),
+        #("task_id", json.int(task_id)),
+      ])
+    EditMemory(task_id, index, new_text) ->
+      json.object([
+        #("type", json.string("edit_memory")),
+        #("task_id", json.int(task_id)),
+        #("index", json.int(index)),
+        #("new_text", json.string(new_text)),
+      ])
+    RemoveMemory(task_id, index) ->
+      json.object([
+        #("type", json.string("remove_memory")),
+        #("task_id", json.int(task_id)),
+        #("index", json.int(index)),
+      ])
+    ToggleTaskExpanded(task_id) ->
+      json.object([
+        #("type", json.string("toggle_task_expanded")),
+        #("task_id", json.int(task_id)),
+      ])
+    OpenDirectory(path) ->
+      json.object([
+        #("type", json.string("open_directory")),
+        #("path", json.string(path)),
+      ])
+    CloseDirectory(path) ->
+      json.object([
+        #("type", json.string("close_directory")),
+        #("path", json.string(path)),
+      ])
+    ReadFile(path) ->
+      json.object([
+        #("type", json.string("read_file")),
+        #("path", json.string(path)),
+      ])
+    CloseReadFile(path) ->
+      json.object([
+        #("type", json.string("close_read_file")),
+        #("path", json.string(path)),
+      ])
+  }
+}
+
+// ============================================================================
+// JSON decoding
+// ============================================================================
+
+pub fn task_snapshot_decoder() -> decode.Decoder(TaskSnapshot) {
+  use id <- decode.field("id", decode.int)
+  use description <- decode.field("description", decode.string)
+  use status <- decode.field("status", task.status_decoder())
+  use memories <- decode.field("memories", decode.list(decode.string))
+  use ui_expanded <- decode.field("ui_expanded", decode.bool)
+  decode.success(TaskSnapshot(
+    id:,
+    description:,
+    status:,
+    memories:,
+    ui_expanded:,
+  ))
+}
+
+pub fn log_item_snapshot_decoder() -> decode.Decoder(LogItemSnapshot) {
+  use type_tag <- decode.field("type", decode.string)
+  case type_tag {
+    "user_message" -> {
+      use text <- decode.field("text", decode.string)
+      use owning_task_id <- decode.field(
+        "owning_task_id",
+        decode.optional(decode.int),
+      )
+      decode.success(UserMessageSnapshot(text:, owning_task_id:))
+    }
+    "response" -> {
+      use response <- decode.field("response", message.message_decoder())
+      use owning_task_id <- decode.field(
+        "owning_task_id",
+        decode.optional(decode.int),
+      )
+      decode.success(ResponseSnapshot(response:, owning_task_id:))
+    }
+    "tool_results" -> {
+      use request <- decode.field("request", message.message_decoder())
+      use owning_task_id <- decode.field(
+        "owning_task_id",
+        decode.optional(decode.int),
+      )
+      decode.success(ToolResultsSnapshot(request:, owning_task_id:))
+    }
+    _ -> decode.failure(UserMessageSnapshot("", None), "LogItemSnapshot")
+  }
+}
+
+pub fn directory_snapshot_decoder() -> decode.Decoder(DirectorySnapshot) {
+  use path <- decode.field("path", decode.string)
+  use entries <- decode.field(
+    "entries",
+    decode.list({
+      use name <- decode.field("name", decode.string)
+      use is_directory <- decode.field("is_directory", decode.bool)
+      decode.success(#(name, is_directory))
+    }),
+  )
+  decode.success(DirectorySnapshot(path:, entries:))
+}
+
+pub fn file_snapshot_decoder() -> decode.Decoder(FileSnapshot) {
+  use path <- decode.field("path", decode.string)
+  use content <- decode.field("content", decode.string)
+  decode.success(FileSnapshot(path:, content:))
+}
+
+pub fn token_record_decoder() -> decode.Decoder(TokenRecord) {
+  use request_number <- decode.field("request_number", decode.int)
+  use input_tokens <- decode.field("input_tokens", decode.int)
+  use output_tokens <- decode.field("output_tokens", decode.int)
+  decode.success(TokenRecord(request_number:, input_tokens:, output_tokens:))
+}
+
+pub fn server_event_decoder() -> decode.Decoder(ServerEvent) {
+  use type_tag <- decode.field("type", decode.string)
+  case type_tag {
+    "agent_state_snapshot" -> {
+      use agent_id <- decode.field("agent_id", decode.string)
+      use goal <- decode.field("goal", decode.optional(decode.string))
+      use system_prompt <- decode.field("system_prompt", decode.string)
+      use tasks <- decode.field("tasks", decode.list(task_snapshot_decoder()))
+      use log <- decode.field("log", decode.list(log_item_snapshot_decoder()))
+      use directories <- decode.field(
+        "directories",
+        decode.list(directory_snapshot_decoder()),
+      )
+      use files <- decode.field("files", decode.list(file_snapshot_decoder()))
+      use token_records <- decode.field(
+        "token_records",
+        decode.list(token_record_decoder()),
+      )
+      decode.success(AgentStateSnapshot(
+        agent_id:,
+        goal:,
+        system_prompt:,
+        tasks:,
+        log:,
+        directories:,
+        files:,
+        token_records:,
+      ))
+    }
+    "goal_updated" -> {
+      use text <- decode.field("text", decode.optional(decode.string))
+      decode.success(GoalUpdated(text:))
+    }
+    "system_prompt_updated" -> {
+      use text <- decode.field("text", decode.string)
+      decode.success(SystemPromptUpdated(text:))
+    }
+    "conversation_appended" -> {
+      use item <- decode.field("item", log_item_snapshot_decoder())
+      decode.success(ConversationAppended(item:))
+    }
+    "task_created" -> {
+      use id <- decode.field("id", decode.int)
+      use description <- decode.field("description", decode.string)
+      decode.success(TaskCreated(id:, description:))
+    }
+    "task_status_changed" -> {
+      use id <- decode.field("id", decode.int)
+      use status <- decode.field("status", task.status_decoder())
+      decode.success(TaskStatusChanged(id:, status:))
+    }
+    "task_memory_added" -> {
+      use id <- decode.field("id", decode.int)
+      use text <- decode.field("text", decode.string)
+      decode.success(TaskMemoryAdded(id:, text:))
+    }
+    "task_memory_removed" -> {
+      use id <- decode.field("id", decode.int)
+      use index <- decode.field("index", decode.int)
+      decode.success(TaskMemoryRemoved(id:, index:))
+    }
+    "task_memory_edited" -> {
+      use id <- decode.field("id", decode.int)
+      use index <- decode.field("index", decode.int)
+      use new_text <- decode.field("new_text", decode.string)
+      decode.success(TaskMemoryEdited(id:, index:, new_text:))
+    }
+    "tokens_used" -> {
+      use input <- decode.field("input", decode.int)
+      use output <- decode.field("output", decode.int)
+      decode.success(TokensUsed(input:, output:))
+    }
+    "file_explorer_updated" -> {
+      use directories <- decode.field(
+        "directories",
+        decode.list(directory_snapshot_decoder()),
+      )
+      use files <- decode.field("files", decode.list(file_snapshot_decoder()))
+      decode.success(FileExplorerUpdated(directories:, files:))
+    }
+    "tool_call_started" -> {
+      use name <- decode.field("name", decode.string)
+      use args_json <- decode.field("args_json", decode.string)
+      use call_id <- decode.field("call_id", decode.string)
+      decode.success(ToolCallStarted(name:, args_json:, call_id:))
+    }
+    "tool_call_completed" -> {
+      use name <- decode.field("name", decode.string)
+      use result <- decode.field("result", decode.string)
+      use call_id <- decode.field("call_id", decode.string)
+      decode.success(ToolCallCompleted(name:, result:, call_id:))
+    }
+    "turn_started" -> decode.success(TurnStarted)
+    "turn_completed" -> {
+      use result <- decode.field("result", turn_result.decoder())
+      decode.success(TurnCompleted(result:))
+    }
+    "agent_error" -> {
+      use reason <- decode.field("reason", decode.string)
+      decode.success(AgentError(reason:))
+    }
+    _ -> decode.failure(TurnStarted, "ServerEvent")
+  }
+}
+
+pub fn client_command_decoder() -> decode.Decoder(ClientCommand) {
+  use type_tag <- decode.field("type", decode.string)
+  case type_tag {
+    "send_user_message" -> {
+      use text <- decode.field("text", decode.string)
+      decode.success(SendUserMessage(text:))
+    }
+    "set_goal" -> {
+      use text <- decode.field("text", decode.string)
+      decode.success(SetGoal(text:))
+    }
+    "clear_goal" -> decode.success(ClearGoal)
+    "set_system_prompt" -> {
+      use text <- decode.field("text", decode.string)
+      decode.success(SetSystemPrompt(text:))
+    }
+    "reset_system_prompt" -> decode.success(ResetSystemPrompt)
+    "create_task" -> {
+      use description <- decode.field("description", decode.string)
+      decode.success(CreateTask(description:))
+    }
+    "start_task" -> {
+      use task_id <- decode.field("task_id", decode.int)
+      decode.success(StartTask(task_id:))
+    }
+    "close_current_task" -> decode.success(CloseCurrentTask)
+    "task_memory_cmd" -> {
+      use text <- decode.field("text", decode.string)
+      decode.success(TaskMemoryCmd(text:))
+    }
+    "pick_task" -> {
+      use task_id <- decode.field("task_id", decode.int)
+      decode.success(PickTask(task_id:))
+    }
+    "remove_task" -> {
+      use task_id <- decode.field("task_id", decode.int)
+      decode.success(RemoveTask(task_id:))
+    }
+    "edit_memory" -> {
+      use task_id <- decode.field("task_id", decode.int)
+      use index <- decode.field("index", decode.int)
+      use new_text <- decode.field("new_text", decode.string)
+      decode.success(EditMemory(task_id:, index:, new_text:))
+    }
+    "remove_memory" -> {
+      use task_id <- decode.field("task_id", decode.int)
+      use index <- decode.field("index", decode.int)
+      decode.success(RemoveMemory(task_id:, index:))
+    }
+    "toggle_task_expanded" -> {
+      use task_id <- decode.field("task_id", decode.int)
+      decode.success(ToggleTaskExpanded(task_id:))
+    }
+    "open_directory" -> {
+      use path <- decode.field("path", decode.string)
+      decode.success(OpenDirectory(path:))
+    }
+    "close_directory" -> {
+      use path <- decode.field("path", decode.string)
+      decode.success(CloseDirectory(path:))
+    }
+    "read_file" -> {
+      use path <- decode.field("path", decode.string)
+      decode.success(ReadFile(path:))
+    }
+    "close_read_file" -> {
+      use path <- decode.field("path", decode.string)
+      decode.success(CloseReadFile(path:))
+    }
+    _ -> decode.failure(ClearGoal, "ClientCommand")
+  }
 }

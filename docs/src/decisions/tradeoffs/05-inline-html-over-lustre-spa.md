@@ -1,6 +1,6 @@
 # Inline HTML + plain JS over Lustre SPA
 
-> **Superseded.** Phase 2 replaced `view_html` with `view_state` returning `List(ServerEvent)`, removed the `lustre` dependency from the backend, and replaced the inline HTML/JS frontend with a minimal event-logging stub. The backend no longer produces HTML. A Lustre SPA frontend is planned for Phase 4.
+> **Superseded.** Phase 2 replaced `view_html` with `view_state` returning `List(ServerEvent)` and removed the `lustre` dependency from the backend. Phase 4 replaced the event-logging stub with a full Lustre SPA frontend.
 
 **The decision.** The browser frontend was a self-contained HTML page with embedded CSS and ~150 lines of vanilla JavaScript, served as an inline string from `frontend.gleam`, rather than a Lustre SPA compiled to JavaScript as a separate compilation unit.
 
@@ -16,11 +16,15 @@ Three approaches were considered:
 
 ## Why it was superseded
 
-The inline approach was replaced in Phase 2 because:
-- Widgets now produce `List(ServerEvent)` domain events instead of HTML — there is no server-side HTML to swap.
-- The `lustre` dependency was removed from the backend entirely.
-- The frontend was replaced with a minimal event-logging stub that displays raw JSON events, serving as a placeholder until the Lustre SPA is built in Phase 4.
-- The costs identified below (no client-side state, innerHTML clobbering, string literal awkwardness) are no longer relevant since the inline HTML approach is gone.
+Phase 2 removed HTML generation from the backend — widgets produce `List(ServerEvent)` domain events. Phase 4 built the Lustre SPA:
+
+- Single-module Lustre app (`eddie_frontend.gleam`) compiled to JS and bundled with esbuild
+- Uses `lustre_websocket` for WebSocket connection with auto-reconnect
+- Decodes `ServerEvent` arrays via shared decoders, encodes `ClientCommand` to send
+- Chat UI with user/assistant messages, collapsible tool results, tool call badges, thinking indicator
+- Sidebar panels: Goal, Tasks, Files, Token Usage
+- Backend `server.gleam` serves an HTML shell + bundled `app.js`, parses `ClientCommand` JSON
+- `frontend.gleam` deleted from the backend
 
 ## What it cost (historical)
 

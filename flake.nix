@@ -15,6 +15,7 @@
         erlang         # erlang runtime (gleam target)
         nodejs         # javascript target support
         rebar3         # erlang build tool (gleam dependency)
+        esbuild        # javascript bundler (frontend)
         go-task        # task runner
         mdbook         # documentation builder
       ];

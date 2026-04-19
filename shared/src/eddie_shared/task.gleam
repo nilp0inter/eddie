@@ -2,6 +2,7 @@
 ///
 /// These are pure data types — the protocol rules and enforcement logic
 /// live in the backend.
+import gleam/dynamic/decode
 import gleam/json
 
 pub type TaskStatus {
@@ -47,4 +48,12 @@ pub fn parse_status(s: String) -> Result(TaskStatus, Nil) {
 
 pub fn status_to_json(status: TaskStatus) -> json.Json {
   json.string(status_to_string(status))
+}
+
+pub fn status_decoder() -> decode.Decoder(TaskStatus) {
+  use s <- decode.then(decode.string)
+  case parse_status(s) {
+    Ok(status) -> decode.success(status)
+    Error(_) -> decode.failure(Pending, "TaskStatus")
+  }
 }

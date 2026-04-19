@@ -228,95 +228,56 @@ No blocking `process.call` anywhere. The agent broadcasts `ServerEvent`s to subs
 
 ---
 
-## Phase 4: Lustre SPA frontend
+## Phase 4: Lustre SPA frontend ✅
 
-**Goal:** Build the frontend as a Lustre app that connects via WebSocket and renders domain events.
+**Status: Complete.**
+
+Built a Lustre SPA that connects via WebSocket, decodes domain events, and renders a chat UI with sidebar panels.
+
+### What was done
+
+**Shared package — JSON decoders added:**
+- `message.gleam`: `message_part_decoder`, `message_decoder`
+- `task.gleam`: `status_decoder`
+- `turn_result.gleam`: `decoder`
+- `protocol.gleam`: `server_event_decoder`, `client_command_to_json`, `client_command_decoder`, plus decoders for all snapshot types (`task_snapshot_decoder`, `log_item_snapshot_decoder`, `directory_snapshot_decoder`, `file_snapshot_decoder`, `token_record_decoder`)
+- 41 roundtrip tests in `shared/test/eddie_shared/protocol_test.gleam`
+
+**Build tooling:**
+- Added `esbuild` to Nix flake `ciPackages`
+- Added `frontend:bundle` task to Taskfile (builds + bundles to `frontend/build/app.js`)
+- Created `frontend/entrypoint.mjs` (version-independent esbuild entrypoint)
+- Updated `backend:run` to depend on `frontend:bundle`
+
+**Frontend SPA** (`frontend/src/eddie_frontend.gleam`):
+- Single-module Lustre application following "life of a file" principle
+- Uses `lustre_websocket` (v0.8.x) for WebSocket connection
+- Model holds agent state (goal, tasks, log, directories, files, tokens)
+- Folds all events from a WebSocket message into the model in a single update cycle
+- Auto-reconnect on disconnect via timer effect
+- Sidebar panels: Goal, Tasks, Files, Token Usage
+- Chat view: user messages, assistant responses with tool call badges, collapsible tool results
+- Thinking indicator with pulsing animation
+- Catppuccin Mocha dark theme
+- Small JS FFI for `setTimeout` and `scrollToBottom`
+
+**Backend server updates:**
+- `server.gleam`: Serves HTML shell at `GET /` with `<div id="app">` + `<script src="/app.js">`
+- `GET /app.js` serves bundled frontend JS via `simplifile.read`
+- `handle_client_message` now parses `ClientCommand` JSON via shared decoder
+- `dispatch_client_command` maps `ClientCommand` variants to widget event dispatch
+- Deleted `backend/src/eddie/frontend.gleam`
 
 ### Frontend structure
 
 ```
 frontend/
-├── gleam.toml
+├── gleam.toml               # JS target, lustre + lustre_websocket + eddie_shared
+├── entrypoint.mjs           # esbuild entrypoint (imports and calls main)
 └── src/
-    ├── eddie_frontend.gleam        # lustre.application(init, update, view)
-    └── eddie_frontend/
-        ├── model.gleam             # Model type (connection, chat, widget states, UI state)
-        ├── msg.gleam               # Msg type (server events + user interactions)
-        ├── update.gleam            # update function
-        ├── view.gleam              # top-level view (layout, routing)
-        ├── websocket.gleam         # WebSocket effect (connect, send, receive)
-        ├── view/
-        │   ├── chat.gleam          # chat area (messages, input, thinking indicator)
-        │   ├── sidebar.gleam       # activity bar + panel container
-        │   ├── goal.gleam          # goal panel
-        │   ├── system_prompt.gleam # system prompt panel
-        │   ├── file_explorer.gleam # file explorer panel
-        │   ├── task.gleam          # task list panel
-        │   └── token_usage.gleam   # token usage panel
-        └── markdown.gleam          # markdown rendering (port from current JS)
+    ├── eddie_frontend.gleam  # Entire Lustre app (Model, Msg, init, update, view)
+    └── eddie_frontend_ffi.mjs  # JS FFI (setTimeout, scrollToBottom)
 ```
-
-### Frontend model
-
-```gleam
-pub type Model {
-  Model(
-    connection: ConnectionStatus,
-    agents: Dict(String, AgentState),
-    active_agent: Option(String),
-    active_panel: Option(String),
-    chat_input: String,
-    thinking: Bool,
-  )
-}
-
-pub type ConnectionStatus {
-  Connecting
-  Connected
-  Disconnected
-}
-
-pub type AgentState {
-  AgentState(
-    goal: Option(String),
-    system_prompt: String,
-    tasks: Dict(Int, Task),
-    task_order: List(Int),
-    messages: List(ChatMessage),
-    files: ...,
-    directories: ...,
-    token_usage: List(TokenRecord),
-  )
-}
-```
-
-### Frontend dependencies
-
-```toml
-[dependencies]
-lustre = ">= 5.6.0 and < 6.0.0"
-gleam_stdlib = ">= 0.44.0 and < 2.0.0"
-gleam_json = ">= 3.1.0 and < 4.0.0"
-eddie_shared = { path = "../shared" }
-```
-
-### Backend serves the SPA
-
-`server.gleam` updated:
-- `GET /` serves an HTML shell that loads the compiled Lustre JS
-- Static assets served from a build output directory
-- WebSocket at `/ws` unchanged (already sends JSON events)
-
-### Key files
-- All new files in `frontend/src/`
-- `backend/src/eddie/server.gleam` — serve static frontend
-- Delete `backend/src/eddie/frontend.gleam`
-
-### Verification
-- `cd frontend && gleam build` — compiles to JS
-- `task backend:run` — serves the SPA
-- Manual: full end-to-end test in browser
-- `cd backend && gleam test` — still passes
 
 ---
 
@@ -330,10 +291,10 @@ eddie_shared = { path = "../shared" }
 - `Model.agents` dict holds per-agent state
 - Switching agents changes `active_agent`, renders that agent's state
 
-### Cleanup
-- Remove `backend/src/eddie/frontend.gleam` (if not already deleted)
-- Update `CLAUDE.md` with new project structure
-- Update `Taskfile.yml` with full monorepo tasks
+### Cleanup (partially done in Phase 4)
+- ~~Remove `backend/src/eddie/frontend.gleam`~~ (done in Phase 4)
+- ~~Update `CLAUDE.md` with new project structure~~ (done in Phase 4)
+- ~~Update `Taskfile.yml` with full monorepo tasks~~ (done in Phase 4)
 - Update mdBook docs
 
 ### Verification

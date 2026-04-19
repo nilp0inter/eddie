@@ -20,21 +20,21 @@ flowchart TB
 
 The **agent loop** is the core cycle:
 
-1. User sends a message through the browser over WebSocket
-2. The mist server spawns a helper process that calls `agent.run_turn` (blocking)
-3. The agent adds the user message to the Context, then enters the turn loop
-4. Each iteration: compose messages + tools → build HTTP request → send to LLM → parse response
-5. If the response contains tool calls, dispatch each to its owning widget via the Context compositor
-6. Record tool results in the conversation log, then loop back to step 4
-7. When the LLM responds with text only, the turn completes and the result is sent back over WebSocket
-8. After every state mutation, the agent computes `changed_state` and pushes JSON-encoded `ServerEvent` lists to all subscribed WebSocket connections
+1. User sends a `ClientCommand` (JSON) through the Lustre SPA over WebSocket
+2. The server parses the command and calls `agent.send_message` (fire-and-forget)
+3. The agent adds the user message to the Context, spawns an async LLM call process
+4. When the LLM responds: parse response, dispatch tool calls (some may spawn async effect processes)
+5. When all effects complete: record tool results, spawn the next LLM call
+6. When the LLM responds with text only, the turn completes
+7. After every state mutation, the agent computes `changed_state` and pushes JSON-encoded `ServerEvent` lists to all subscribed WebSocket connections
+8. The Lustre SPA decodes `ServerEvent` arrays and updates its model, rendering the chat UI and sidebar panels
 
 ## Key differences from Calipso
 
 | Aspect | Calipso (Python) | Eddie (Gleam) |
 |---|---|---|
 | Agent model | Mono-agent asyncio | OTP actor (single-threaded, message-based) |
-| Frontend | htmx SPA (no build step) | Minimal event-logging stub (Lustre SPA planned for Phase 4) |
+| Frontend | htmx SPA (no build step) | Lustre SPA (JS target, `lustre_websocket`) |
 | Widget output | Plain HTML strings with htmx OOB swaps | `List(ServerEvent)` domain events, JSON-encoded over WebSocket |
 | LLM client | Pydantic AI | glopenai (sans-IO) + gleam_httpc |
 | Structured output | Pydantic AI built-in | Custom layer using sextant (Phase 5) |

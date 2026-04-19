@@ -106,11 +106,26 @@ tasks:
     cmds:
       - gleam format --check
 
+  frontend:bundle:
+    desc: Bundle frontend JS for browser
+    dir: frontend
+    deps:
+      - frontend:build
+    cmds:
+      - esbuild entrypoint.mjs --bundle --outfile=build/app.js --format=iife
+    sources:
+      - src/**/*.gleam
+      - gleam.toml
+      - entrypoint.mjs
+    generates:
+      - build/app.js
+
   backend:run:
     desc: Run the backend server
     dir: backend
     deps:
       - backend:build
+      - frontend:bundle
     cmds:
       - gleam run
 
