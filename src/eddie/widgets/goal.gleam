@@ -7,6 +7,7 @@ import gleam/dynamic/decode
 import gleam/json
 import gleam/option.{type Option, None, Some}
 import gleam/set
+import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
 
@@ -107,9 +108,29 @@ fn view_html(model: GoalModel) -> Element(Nil) {
   html.div([], [
     html.h3([], [html.text("Goal")]),
     content,
-    html.input([]),
-    html.button([], [html.text("Set")]),
-    html.button([], [html.text("Clear")]),
+    html.input([
+      attribute.id("goal-input"),
+      attribute.attribute("placeholder", "Set a goal..."),
+      attribute.attribute(
+        "onkeydown",
+        "if(event.key==='Enter'){sendWidgetEvent('set_goal',{goal:this.value});this.value='';}",
+      ),
+    ]),
+    html.button(
+      [
+        attribute.attribute(
+          "onclick",
+          "sendWidgetEvent('set_goal', {goal: document.getElementById('goal-input').value})",
+        ),
+      ],
+      [html.text("Set")],
+    ),
+    html.button(
+      [
+        attribute.attribute("onclick", "sendWidgetEvent('clear_goal', {})"),
+      ],
+      [html.text("Clear")],
+    ),
   ])
 }
 

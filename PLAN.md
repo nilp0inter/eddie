@@ -200,6 +200,35 @@ Reference files:
 
 ---
 
+## Phase 7: Frontend Parity with Calipso ✅
+
+**Status:** Complete — 164 tests passing, glinter clean (expected warnings only).
+
+**Goal:** Bring the browser frontend to functional parity with the Calipso Python reference. All widget HTML stubs replaced with fully interactive implementations.
+
+**Implemented:**
+- `src/eddie/server.gleam` — VS Code-style activity bar layout (48px icon strip + 320px collapsible side panel), `sendWidgetEvent` JS function for widget interactivity, `togglePanel`/`notifyWidgetUpdate` for panel management with notification badges, client-side markdown renderer (regex-based), tool call/result rendering as collapsible `<details>` blocks in the chat stream, Catppuccin-themed CSS for all components
+- `src/eddie/widgets/system_prompt.gleam` — `view_html` wired with `onclick` handlers for Save/Reset buttons
+- `src/eddie/widgets/goal.gleam` — `view_html` wired with `onkeydown` Enter-key handler and `onclick` for Set/Clear buttons
+- `src/eddie/widgets/file_explorer.gleam` — `view_html` wired with Root button, `ondblclick` for directory/file navigation, close buttons, `escape_js` helper for safe inline JS
+- `src/eddie/widgets/conversation_log.gleam` — Full `view_html` rewrite: create-task input, pending/in-progress/done task panels, memory add/remove, collapsible done tasks with `ontoggle`
+- `src/eddie/widgets/token_usage.gleam` — SVG stacked bar chart (blue input, orange output) with native browser tooltips, last 20 requests
+- `src/eddie/agent.gleam` — `notify_tool_call`/`notify_tool_result` send JSON progress messages to WebSocket subscribers during tool dispatch
+
+**Key design decisions made during implementation:**
+- Client-side markdown rendering via regex (no external JS dependencies) rather than server-side Gleam rendering — see [trade-off card 12](docs/src/decisions/tradeoffs/12-client-side-markdown-rendering.md)
+- Activity bar icon buttons with notification badges match Calipso's VS Code-style layout
+- Widget event handlers embedded as inline JS strings (`onclick`, `onkeydown`, `ondblclick`) calling `sendWidgetEvent` — straightforward but untyped
+- Tool call progress sent as JSON alongside HTML OOB fragments, reusing the existing subscriber mechanism
+- `escape_js` helper in file_explorer prevents injection from file paths with special characters
+
+**Dependencies added:** — (no new dependencies)
+
+**Tests cover:**
+- All 164 existing tests pass unchanged — frontend changes are purely in `view_html` (not tested for exact HTML) and agent notifications (tested indirectly via subscriber test)
+
+---
+
 ## Dependency Summary
 
 | Phase | New Dependencies |
@@ -210,6 +239,7 @@ Reference files:
 | 4 | gleam_otp, gleam_erlang, mist |
 | 5 | sextant |
 | 6 | simplifile |
+| 7 | — |
 
 ## Verification
 
@@ -217,3 +247,4 @@ After each phase, run `task tests:unit` to verify all tests pass. Key end-to-end
 
 - **Phase 4 (Milestone 1):** `gleam run` → open browser → see agent list → click agent → chat with LLM in web UI
 - **Phase 6:** spawn child agent from parent, observe child state in parent's dashboard
+- **Phase 7:** all widgets interactive in sidebar, activity bar toggles panels, tool calls visible in chat, markdown rendered

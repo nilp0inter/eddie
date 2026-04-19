@@ -1,9 +1,5 @@
 # Technical Debt
 
-## Placeholder `view_html` in Phase 2 widgets
-
-Both `system_prompt.gleam` and `conversation_log.gleam` have stub `view_html` implementations — a textarea with buttons for SystemPrompt, and a text summary for ConversationLog. The Calipso reference has rich interactive HTML (collapsible task blocks, memory editing inline, tool call grouping). These stubs are now rendered in the browser sidebar via the Phase 4 server, but they remain minimal. Rich widget HTML should be implemented once the end-to-end loop is stable and the widget interaction patterns are settled.
-
 ## Reversed-list index arithmetic in memory editing
 
 `EditMemory` and `RemoveMemory` in `conversation_log.gleam` compute `mem_len - 1 - index` to map user-facing indices to the internal reversed list. This is correct but fragile — any change to the memory storage strategy requires updating the arithmetic in multiple places. If memory editing becomes more complex (reordering, bulk operations), consider switching to a data structure with direct index access or storing memories in display order and accepting the O(n) append cost.
@@ -68,6 +64,18 @@ After sending usage data to the token_usage widget, `record_token_usage` creates
 
 The file explorer's `open_directory` and `read_file` tools accept arbitrary paths from the LLM with no sandboxing or path traversal protection. The LLM can read any file the BEAM process has access to, including `..` paths, symlink targets, and sensitive configuration. For a single-user local agent this matches the trust model (the LLM acts on behalf of the user), but for any multi-user or exposed deployment, a path allowlist or chroot-like restriction would be essential.
 
-## Placeholder view_html in Phase 6 widgets
+## Inline HTML frontend exceeds natural size for a string literal
 
-Goal, file explorer, and token usage widgets have minimal `view_html` implementations — basic Lustre elements without styling, interactivity, or the rich HTML that the Calipso Python reference provides. The inline JS in `server.gleam` handles OOB swaps by element ID, so the widgets are visible in the browser sidebar, but the UX is placeholder quality. This matches the existing debt for Phase 2 widgets (SystemPrompt and ConversationLog stubs).
+The `index_html()` function in `server.gleam` now contains ~200 lines of HTML/CSS and ~150 lines of JavaScript. This exceeds the threshold identified in [trade-off card 05](./tradeoffs/05-inline-html-over-lustre-spa.md) as a reconsideration trigger. Editing the frontend requires escaping quotes, there is no syntax highlighting, and no hot-reload. The frontend is functionally complete (activity bar, interactive widgets, markdown rendering, tool call display), making a migration to Lustre SPA or separate HTML files a reasonable next step if further frontend complexity is added. For now, the inline approach still works because the JS is straightforward DOM manipulation with no component state management.
+
+## Minimal client-side markdown renderer
+
+The `renderMarkdown()` function in `server.gleam` is a ~15-line regex-based parser handling fenced code blocks, inline code, bold, italic, headers, and lists. It does not handle nested formatting, block quotes, tables, horizontal rules, or escaped characters. For LLM output this is usually sufficient, but edge cases (nested bold inside code, multi-paragraph list items) will render incorrectly. Replacing with a proper library (e.g., marked.js) would fix these but adds an external dependency to a currently zero-dependency frontend.
+
+## Token usage HTML change invisible to subscribers
+
+In `agent.gleam`, `record_token_usage` updates the context before `old_ctx` is captured for the subsequent `notify_subscribers` call. This means the token usage widget's HTML change is included in both old and new context snapshots, so `changed_html` never detects it. Token usage updates only become visible when another widget's HTML changes in the same notification cycle (e.g., the conversation log). The fix would be to capture `old_ctx` before `record_token_usage`, but this changes the notification semantics for all widgets in that cycle.
+
+## Inline JS event handlers in widget `view_html`
+
+All interactive widgets generate inline `onclick`/`onkeydown`/`ondblclick` attributes with `sendWidgetEvent(...)` calls embedded as string literals. This works but has no compile-time safety — a typo in an event name or argument key is caught only at runtime. The file explorer uses an `escape_js` helper to prevent injection from file paths, but there is no systematic escaping strategy for other widgets. If widget interactivity grows more complex, a structured approach (e.g., data attributes with a single delegated event listener) would be more maintainable.

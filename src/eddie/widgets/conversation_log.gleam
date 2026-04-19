@@ -21,6 +21,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
 
@@ -972,21 +973,201 @@ fn log_item_task_id(item: LogItem) -> Option(Int) {
 }
 
 // ============================================================================
-// View HTML (placeholder — will be fleshed out in Phase 4)
+// View HTML
 // ============================================================================
 
 fn view_html(model: ConversationLogModel) -> Element(Nil) {
-  let task_count = dict.size(model.tasks)
+  let create_input =
+    html.input([
+      attribute.attribute("placeholder", "Create a task..."),
+      attribute.style("width", "100%"),
+      attribute.attribute(
+        "onkeydown",
+        "if(event.key==='Enter'&&this.value.trim()){sendWidgetEvent('create_task',{description:this.value.trim()});this.value='';}",
+      ),
+    ])
+
+  let task_ids = list.reverse(model.task_order)
+  let task_panels =
+    list.filter_map(task_ids, fn(tid) {
+      case dict.get(model.tasks, tid) {
+        Ok(task) -> Ok(render_task(task, model.active_task_id))
+        Error(_) -> Error(Nil)
+      }
+    })
+
   let log_count = list.length(model.log)
   html.div([], [
-    html.text(
-      "Conversation Log: "
-      <> int.to_string(log_count)
-      <> " items, "
-      <> int.to_string(task_count)
-      <> " tasks",
+    html.h3([], [html.text("Tasks")]),
+    html.div(
+      [
+        attribute.style("font-size", "11px"),
+        attribute.style("color", "#6c7086"),
+      ],
+      [html.text(int.to_string(log_count) <> " messages")],
+    ),
+    create_input,
+    html.div([], task_panels),
+  ])
+}
+
+fn render_task(task: Task, active_task_id: Option(Int)) -> Element(Nil) {
+  let tid = int.to_string(task.id)
+  case task.status {
+    Pending -> render_pending_task(task, tid)
+    InProgress -> render_in_progress_task(task, tid)
+    Done -> render_done_task(task, tid, active_task_id)
+  }
+}
+
+fn render_pending_task(task: Task, tid: String) -> Element(Nil) {
+  html.div(
+    [attribute.style("padding", "4px 0"), attribute.style("display", "flex")],
+    [
+      html.span([], [html.text("[ ] #" <> tid <> ": " <> task.description)]),
+      html.button(
+        [
+          attribute.attribute(
+            "onclick",
+            "sendWidgetEvent('start_task',{task_id:" <> tid <> "})",
+          ),
+          attribute.style("margin-left", "auto"),
+        ],
+        [html.text("Start")],
+      ),
+      html.button(
+        [
+          attribute.attribute(
+            "onclick",
+            "sendWidgetEvent('remove_task',{task_id:" <> tid <> "})",
+          ),
+        ],
+        [html.text("Remove")],
+      ),
+    ],
+  )
+}
+
+fn render_in_progress_task(task: Task, tid: String) -> Element(Nil) {
+  let memory_count = list.length(task.memories)
+  let has_memories = memory_count > 0
+
+  let memory_elements = render_memories(task.id, task.memories)
+
+  let add_memory_input =
+    html.input([
+      attribute.attribute("placeholder", "Add memory..."),
+      attribute.style("width", "100%"),
+      attribute.attribute(
+        "onkeydown",
+        "if(event.key==='Enter'&&this.value.trim()){sendWidgetEvent('task_memory',{text:this.value.trim(),task_id:"
+          <> tid
+          <> "});this.value='';}",
+      ),
+    ])
+
+  let close_attrs = case has_memories {
+    True -> [
+      attribute.attribute("onclick", "sendWidgetEvent('close_current_task',{})"),
+    ]
+    False -> [attribute.attribute("disabled", "true")]
+  }
+
+  html.div(
+    [
+      attribute.style("padding", "8px"),
+      attribute.style("margin", "4px 0"),
+      attribute.style("background", "#fef7e6"),
+      attribute.style("border-radius", "4px"),
+      attribute.style("color", "#1e1e2e"),
+    ],
+    list.flatten([
+      [
+        html.div([], [
+          html.text(
+            "[~] #"
+            <> tid
+            <> ": "
+            <> task.description
+            <> " — "
+            <> int.to_string(memory_count)
+            <> " memories",
+          ),
+        ]),
+      ],
+      memory_elements,
+      [add_memory_input, html.button(close_attrs, [html.text("Close Task")])],
+    ]),
+  )
+}
+
+fn render_done_task(
+  task: Task,
+  tid: String,
+  _active_task_id: Option(Int),
+) -> Element(Nil) {
+  let memory_count = list.length(task.memories)
+  let summary_text =
+    "[x] #"
+    <> tid
+    <> ": "
+    <> task.description
+    <> " — "
+    <> int.to_string(memory_count)
+    <> " memories"
+
+  let memory_elements = case task.ui_expanded {
+    True -> render_memories(task.id, task.memories)
+    False -> []
+  }
+
+  html.div([attribute.style("padding", "4px 0")], [
+    element.element(
+      "details",
+      [
+        attribute.attribute(
+          "ontoggle",
+          "sendWidgetEvent('toggle_task_expanded',{task_id:" <> tid <> "})",
+        ),
+        ..case task.ui_expanded {
+          True -> [attribute.attribute("open", "")]
+          False -> []
+        }
+      ],
+      [
+        element.element("summary", [], [html.text(summary_text)]),
+        html.div([], memory_elements),
+      ],
     ),
   ])
+}
+
+fn render_memories(task_id: Int, memories: List(String)) -> List(Element(Nil)) {
+  let tid = int.to_string(task_id)
+  list.index_map(memories, fn(memory, index) {
+    let idx = int.to_string(index)
+    html.div(
+      [attribute.style("display", "flex"), attribute.style("padding", "2px 0")],
+      [
+        html.span([attribute.style("flex", "1")], [
+          html.text(int.to_string(index + 1) <> ". " <> memory),
+        ]),
+        html.button(
+          [
+            attribute.attribute(
+              "onclick",
+              "sendWidgetEvent('remove_memory',{task_id:"
+                <> tid
+                <> ",index:"
+                <> idx
+                <> "})",
+            ),
+          ],
+          [html.text("\u{00d7}")],
+        ),
+      ],
+    )
+  })
 }
 
 // ============================================================================

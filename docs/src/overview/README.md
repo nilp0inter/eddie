@@ -34,7 +34,7 @@ The **agent loop** is the core cycle:
 | Aspect | Calipso (Python) | Eddie (Gleam) |
 |---|---|---|
 | Agent model | Mono-agent asyncio | OTP actor (single-threaded, message-based) |
-| Frontend | htmx SPA (no build step) | Inline HTML + plain JS over WebSocket (no build step) |
+| Frontend | htmx SPA (no build step) | VS Code-style activity bar + inline HTML/JS over WebSocket (no build step) |
 | Widget HTML | Plain HTML strings with htmx OOB swaps | Lustre element types, serialised with `data-swap-oob` for manual DOM swap |
 | LLM client | Pydantic AI | glopenai (sans-IO) + gleam_httpc |
 | Structured output | Pydantic AI built-in | Custom layer using sextant (Phase 5) |

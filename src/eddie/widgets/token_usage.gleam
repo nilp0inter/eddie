@@ -3,11 +3,13 @@
 /// Display-only: no LLM tools or messages. Receives UsageRecorded
 /// via widget.send() after each LLM response.
 import gleam/dynamic.{type Dynamic}
+import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None}
 import gleam/set
 import gleam/string
+import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
 
@@ -68,6 +70,8 @@ fn view_tools(_model: TokenUsageModel) -> List(ToolDefinition) {
   []
 }
 
+const max_visible = 20
+
 fn view_html(model: TokenUsageModel) -> Element(Nil) {
   case model.records {
     [] ->
@@ -90,29 +94,126 @@ fn view_html(model: TokenUsageModel) -> Element(Nil) {
         <> " | out: "
         <> format_tokens(total_output)
 
-      // Show last 10 records
-      let visible = list.drop(records, int.max(0, request_count - 10))
-      let record_lines =
-        list.map(visible, fn(r: TokenRecord) {
-          html.div([], [
-            html.text(
-              "#"
-              <> int.to_string(r.request_number)
-              <> ": in="
-              <> format_tokens(r.input_tokens)
-              <> " out="
-              <> format_tokens(r.output_tokens),
-            ),
-          ])
-        })
+      let visible = list.drop(records, int.max(0, request_count - max_visible))
+      let chart = render_svg_chart(visible)
+
+      let legend =
+        html.div(
+          [
+            attribute.style("font-size", "11px"),
+            attribute.style("display", "flex"),
+            attribute.style("gap", "12px"),
+            attribute.style("margin-top", "4px"),
+          ],
+          [
+            html.span([], [html.text("\u{25a0} Input")]),
+            html.span([], [html.text("\u{25a0} Output")]),
+          ],
+        )
 
       html.div([], [
         html.h3([], [html.text("Token Usage")]),
-        html.div([], [html.text(summary)]),
-        html.div([], record_lines),
+        html.div(
+          [
+            attribute.style("font-size", "12px"),
+            attribute.style("color", "#a6adc8"),
+          ],
+          [html.text(summary)],
+        ),
+        chart,
+        legend,
       ])
     }
   }
+}
+
+fn render_svg_chart(records: List(TokenRecord)) -> Element(Nil) {
+  let count = list.length(records)
+  let bar_width = 12
+  let gap = 3
+  let svg_width = count * { bar_width + gap }
+  let chart_height = 100
+
+  // Find max total tokens for scaling
+  let max_tokens =
+    list.fold(records, 1, fn(acc, r: TokenRecord) {
+      int.max(acc, r.input_tokens + r.output_tokens)
+    })
+
+  let bars =
+    list.index_map(records, fn(record, index) {
+      let bar_x = index * { bar_width + gap }
+      let total = record.input_tokens + record.output_tokens
+      let total_height =
+        float.round(
+          int.to_float(total)
+          *. int.to_float(chart_height)
+          /. int.to_float(max_tokens),
+        )
+      let input_height =
+        float.round(
+          int.to_float(record.input_tokens)
+          *. int.to_float(chart_height)
+          /. int.to_float(max_tokens),
+        )
+      let output_height = total_height - input_height
+
+      let tooltip =
+        "#"
+        <> int.to_string(record.request_number)
+        <> ": in="
+        <> format_tokens(record.input_tokens)
+        <> " out="
+        <> format_tokens(record.output_tokens)
+
+      // Input bar (blue) on bottom, output bar (orange) on top
+      let input_y = chart_height - input_height
+      let output_y = input_y - output_height
+
+      [
+        // Output bar (orange, on top)
+        element.element(
+          "rect",
+          [
+            attribute.attribute("x", int.to_string(bar_x)),
+            attribute.attribute("y", int.to_string(output_y)),
+            attribute.attribute("width", int.to_string(bar_width)),
+            attribute.attribute("height", int.to_string(output_height)),
+            attribute.attribute("fill", "#ed7d31"),
+            attribute.attribute("rx", "1"),
+          ],
+          [element.element("title", [], [html.text(tooltip)])],
+        ),
+        // Input bar (blue, on bottom)
+        element.element(
+          "rect",
+          [
+            attribute.attribute("x", int.to_string(bar_x)),
+            attribute.attribute("y", int.to_string(input_y)),
+            attribute.attribute("width", int.to_string(bar_width)),
+            attribute.attribute("height", int.to_string(input_height)),
+            attribute.attribute("fill", "#5b9bd5"),
+            attribute.attribute("rx", "1"),
+          ],
+          [element.element("title", [], [html.text(tooltip)])],
+        ),
+      ]
+    })
+
+  element.element(
+    "svg",
+    [
+      attribute.attribute("width", int.to_string(svg_width)),
+      attribute.attribute("height", int.to_string(chart_height)),
+      attribute.attribute(
+        "viewBox",
+        "0 0 " <> int.to_string(svg_width) <> " " <> int.to_string(chart_height),
+      ),
+      attribute.style("display", "block"),
+      attribute.style("margin", "8px 0"),
+    ],
+    list.flatten(bars),
+  )
 }
 
 /// Format token count with K/M suffix.

@@ -11,6 +11,7 @@ import gleam/order
 import gleam/result
 import gleam/set
 import gleam/string
+import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
 import simplifile
@@ -281,22 +282,68 @@ fn view_tools(_model: FileExplorerModel) -> List(ToolDefinition) {
 }
 
 fn view_html(model: FileExplorerModel) -> Element(Nil) {
+  let root_button =
+    html.button(
+      [
+        attribute.attribute(
+          "onclick",
+          "sendWidgetEvent('open_directory', {path: '.'})",
+        ),
+      ],
+      [html.text("Root")],
+    )
+
   let dir_entries =
     list.flat_map(model.open_directories, fn(directory) {
+      let escaped_path = escape_js(directory.path)
       [
         html.div([], [
           html.code([], [html.text(directory.path)]),
-          html.button([], [html.text("x")]),
+          html.button(
+            [
+              attribute.attribute(
+                "onclick",
+                "sendWidgetEvent('close_directory', {path: '"
+                  <> escaped_path
+                  <> "'})",
+              ),
+            ],
+            [html.text("\u{00d7}")],
+          ),
         ]),
         html.ul(
           [],
           list.map(directory.entries, fn(entry) {
             let #(name, is_dir) = entry
-            let display = case is_dir {
-              True -> name <> "/"
-              False -> name
+            let full_path = escape_js(directory.path <> "/" <> name)
+            case is_dir {
+              True ->
+                html.li(
+                  [
+                    attribute.style("cursor", "pointer"),
+                    attribute.attribute(
+                      "ondblclick",
+                      "sendWidgetEvent('open_directory', {path: '"
+                        <> full_path
+                        <> "'})",
+                    ),
+                  ],
+                  [html.text(name <> "/")],
+                )
+              False ->
+                html.li(
+                  [
+                    attribute.style("cursor", "pointer"),
+                    attribute.attribute(
+                      "ondblclick",
+                      "sendWidgetEvent('read_file', {path: '"
+                        <> full_path
+                        <> "'})",
+                    ),
+                  ],
+                  [html.text(name)],
+                )
             }
-            html.li([], [html.text(display)])
           }),
         ),
       ]
@@ -305,10 +352,21 @@ fn view_html(model: FileExplorerModel) -> Element(Nil) {
   let file_entries =
     list.flat_map(model.open_files, fn(entry) {
       let #(path, content) = entry
+      let escaped_path = escape_js(path)
       [
         html.div([], [
           html.code([], [html.text(path)]),
-          html.button([], [html.text("x")]),
+          html.button(
+            [
+              attribute.attribute(
+                "onclick",
+                "sendWidgetEvent('close_read_file', {path: '"
+                  <> escaped_path
+                  <> "'})",
+              ),
+            ],
+            [html.text("\u{00d7}")],
+          ),
         ]),
         html.pre([], [html.code([], [html.text(content)])]),
       ]
@@ -316,8 +374,17 @@ fn view_html(model: FileExplorerModel) -> Element(Nil) {
 
   html.div([], [
     html.h3([], [html.text("File Explorer")]),
+    root_button,
     ..list.append(dir_entries, file_entries)
   ])
+}
+
+/// Escape a string for safe embedding in a JavaScript single-quoted string literal.
+fn escape_js(input: String) -> String {
+  input
+  |> string.replace("\\", "\\\\")
+  |> string.replace("'", "\\'")
+  |> string.replace("\n", "\\n")
 }
 
 // ============================================================================

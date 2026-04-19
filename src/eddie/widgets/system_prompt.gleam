@@ -6,6 +6,7 @@ import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/option.{type Option, None, Some}
 import gleam/set
+import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
 
@@ -59,9 +60,32 @@ fn view_tools(_model: SystemPromptModel) -> List(ToolDefinition) {
 
 fn view_html(model: SystemPromptModel) -> Element(Nil) {
   html.div([], [
-    html.textarea([], model.text),
-    html.button([], [html.text("Save")]),
-    html.button([], [html.text("Reset")]),
+    html.textarea(
+      [
+        attribute.id("sp-textarea"),
+        attribute.attribute("rows", "8"),
+        attribute.style("width", "100%"),
+      ],
+      model.text,
+    ),
+    html.button(
+      [
+        attribute.attribute(
+          "onclick",
+          "sendWidgetEvent('set_system_prompt', {text: document.getElementById('sp-textarea').value})",
+        ),
+      ],
+      [html.text("Save")],
+    ),
+    html.button(
+      [
+        attribute.attribute(
+          "onclick",
+          "sendWidgetEvent('reset_system_prompt', {})",
+        ),
+      ],
+      [html.text("Reset")],
+    ),
   ])
 }
 

@@ -36,6 +36,8 @@ The recursive turn loop (`turn_loop → do_turn_step → handle_llm_response →
 
 After each state mutation (user message added, response recorded, tool calls dispatched, tool results recorded), the agent computes `context.changed_html(old, new)` and wraps each changed widget's HTML in a `<div id="widget-{id}" data-swap-oob="true">` envelope. The concatenated HTML string is sent to all subscriber Subjects. This is a fire-and-forget push — subscribers are WebSocket handler processes that forward the HTML to the browser.
 
+During tool dispatch, the agent also sends tool call progress notifications as JSON to subscribers. Each tool call sends a `{"type": "tool_call", "name": "...", "args": "..."}` message before dispatch and a `{"type": "tool_result", "name": "...", "result": "..."}` message after dispatch. The browser renders these as collapsible detail blocks in the chat stream, giving visibility into the agent's actions during a turn.
+
 ### `eddie/server`
 
 Mist HTTP and WebSocket server. Thin glue between the browser and the agent actor.
@@ -69,10 +71,19 @@ Each WebSocket connection is a separate BEAM process. On init, it creates two Su
 | HTML fragments | Raw HTML with `data-swap-oob` divs | Widget state changes (pushed by agent subscriber) |
 | `turn_start` | `{"type": "turn_start"}` | Enables thinking indicator in the browser |
 | `turn_end` | `{"type": "turn_end", "success": bool, "text": "...", "error": "..."}` | Disables thinking indicator, displays response |
+| `tool_call` | `{"type": "tool_call", "name": "...", "args": "..."}` | Shows tool call in chat as collapsible block |
+| `tool_result` | `{"type": "tool_result", "name": "...", "result": "..."}` | Shows tool result in chat with distinct styling |
 
 **Inline HTML frontend:**
 
-The `index_html()` function returns a self-contained HTML page with embedded CSS and ~40 lines of JavaScript. Features: Catppuccin-themed chat interface, sidebar widget panels, WebSocket with auto-reconnect, manual DOM swap for OOB-tagged fragments, thinking indicator during turns. No build step, no external dependencies. This approach matches Calipso's htmx pattern but without the htmx library — just plain `element.innerHTML` replacement keyed by element ID.
+The `index_html()` function returns a self-contained HTML page with embedded CSS and ~150 lines of JavaScript. The layout uses a VS Code-style activity bar (48px icon strip) with a collapsible side panel (320px) and main chat area. Features:
+
+- **Activity bar** — icon buttons for each widget (System Prompt, Goal, File Explorer, Tasks, Token Usage) with notification badges for updates to inactive panels
+- **Side panel** — displays one widget at a time, toggled by activity bar clicks
+- **Chat area** — Catppuccin-themed message bubbles with markdown rendering for assistant responses, tool call/result display as collapsible blocks, thinking indicator during turns
+- **WebSocket** — auto-reconnect, `sendWidgetEvent(name, args)` function for widget interactivity, manual DOM swap for OOB-tagged fragments
+
+No build step, no external dependencies. See [trade-off card](../decisions/tradeoffs/05-inline-html-over-lustre-spa.md) for rationale and costs.
 
 ### `eddie` (entry point)
 
@@ -108,6 +119,7 @@ Identity and framing text for the agent. The simplest widget — holds a single 
 - **Messages:** `SetSystemPrompt(text)` | `ResetSystemPrompt`
 - **LLM tools:** none — UI-only widget
 - **Frontend events:** `set_system_prompt` (carries `{text: "..."}`) and `reset_system_prompt`
+- **Views:** `view_html` renders a textarea with the current prompt text, a Save button (`sendWidgetEvent('set_system_prompt', ...)`) and a Reset button (`sendWidgetEvent('reset_system_prompt', {})`)
 - **Factory:** `create(text:)` or `create_default()` (default text establishes the Eddie identity and workflow instructions)
 
 The update function is trivial: `SetSystemPrompt` replaces the text, `ResetSystemPrompt` reverts to the default. Both return `CmdNone` since there's no LLM to respond to.
@@ -171,6 +183,14 @@ Log items are walked in chronological order, grouped by consecutive `owning_task
 
 An "Open tasks" block listing pending and in-progress tasks is appended at the end.
 
+**`view_html`** renders a full task management panel:
+- A create-task input (Enter key triggers `sendWidgetEvent('create_task', ...)`)
+- A message count indicator
+- Pending tasks with Start and Remove buttons
+- In-progress task banner with memory list, add-memory input, and Close Task button (disabled until at least one memory exists)
+- Done tasks as collapsible `<details>` elements with `ontoggle` → `sendWidgetEvent('toggle_task_expanded', ...)`
+- Memory items with numbered display and remove buttons
+
 **Factory:** `create()` — returns a `WidgetHandle` with an empty model. For Context's use, `init()` returns a typed `ConversationLog` opaque type with direct dispatch, protocol checking, and owning task ID access (see [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md)).
 
 ### `eddie/widgets/goal` (Phase 6)
@@ -181,7 +201,7 @@ Protocol-free goal tracking. Both the LLM and the browser can set or clear the g
 - **Messages:** `SetGoal(goal, initiator)` | `ClearGoal(initiator)` — both carry `Initiator` to determine whether to return a tool result
 - **LLM tools:** `set_goal` (string `goal` parameter) and `clear_goal` (no parameters) — both protocol-free
 - **Frontend events:** `set_goal` and `clear_goal`
-- **Views:** `view_messages` yields a `UserPart` with `## Goal\n{text}` or `## Goal\nNo goal set`; `view_html` renders a heading, content, input field, and buttons
+- **Views:** `view_messages` yields a `UserPart` with `## Goal\n{text}` or `## Goal\nNo goal set`; `view_html` renders a heading, content display, input field with Enter-key handler (`sendWidgetEvent('set_goal', ...)`), Set button, and Clear button (`sendWidgetEvent('clear_goal', {})`)
 - **Factory:** `create(text:)` with `Option(String)`, or `create_default()` for no initial goal
 
 ### `eddie/widgets/file_explorer` (Phase 6)
@@ -195,7 +215,7 @@ Filesystem navigation using `CmdEffect` for IO operations. All tools are protoco
   - Close: `CloseDirectory(path, initiator)`, `CloseReadFile(path, initiator)`
 - **LLM tools:** `open_directory` (path defaults to `"."`), `close_directory`, `read_file`, `close_read_file` — all protocol-free
 - **Frontend events:** same four tool names
-- **Views:** `view_messages` yields a markdown listing of open directories and file contents; `view_html` renders directory trees and file previews
+- **Views:** `view_messages` yields a markdown listing of open directories and file contents; `view_html` renders a Root button (`sendWidgetEvent('open_directory', {path: '.'})`), directory listings with double-click navigation (`ondblclick` → `sendWidgetEvent('open_directory'/'read_file', ...)`), close buttons for directories and files, and file content in `<pre>` blocks. An `escape_js` helper sanitises file paths for safe embedding in inline JS handlers
 - **IO pattern:** `CmdEffect(perform: fn() { coerce.unsafe_coerce(do_open_directory(path)) }, to_msg: coerce.unsafe_coerce)` — the perform closure runs the real IO, returns a `FileExplorerMsg` coerced to `Dynamic`, and `to_msg` coerces it back. Re-opening the same path refreshes the listing
 - **Factory:** `create()`
 
@@ -205,7 +225,7 @@ Display-only token tracking. No LLM tools or messages — receives data via `wid
 
 - **Model:** `TokenUsageModel(records: List(TokenRecord))` — records stored reversed (prepend), reversed for display. `TokenRecord(request_number, input_tokens, output_tokens)`
 - **Messages:** `UsageRecorded(input_tokens, output_tokens)` — a single message variant
-- **Views:** `view_messages` returns `[]`, `view_tools` returns `[]`; `view_html` shows request count, total input/output tokens (with K/M suffix formatting), and the last 10 records
+- **Views:** `view_messages` returns `[]`, `view_tools` returns `[]`; `view_html` renders a summary line (request count, total input/output with K/M formatting), an SVG stacked bar chart (blue for input tokens, orange for output, last 20 requests) with native browser tooltips via `<title>` elements, and a colour legend
 - **Integration:** the agent's `record_token_usage` function finds the token_usage widget by ID in the children list and sends a `UsageRecorded` message via `widget.send` after each parsed LLM response
 - **Factory:** `create()`
 

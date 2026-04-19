@@ -11,3 +11,4 @@
 9. [Agent tree without OTP supervision](./tradeoffs/09-agent-tree-without-supervision.md) — standalone child actors without supervisor restart or health monitoring
 10. [Token usage recording via Context reconstruction](./tradeoffs/10-token-usage-via-context-rebuild.md) — string ID lookup and Context rebuild to deliver usage data to the token_usage widget
 11. [Synchronous simplifile IO inside CmdEffect](./tradeoffs/11-simplifile-sync-io-in-cmdeffect.md) — file explorer blocks the agent actor during filesystem operations
+12. [Client-side markdown rendering](./tradeoffs/12-client-side-markdown-rendering.md) — regex-based JS parser in the browser instead of server-side Gleam rendering

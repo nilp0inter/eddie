@@ -31,4 +31,5 @@
   - [Agent tree without supervision](./decisions/tradeoffs/09-agent-tree-without-supervision.md)
   - [Token usage via Context rebuild](./decisions/tradeoffs/10-token-usage-via-context-rebuild.md)
   - [Simplifile sync IO in CmdEffect](./decisions/tradeoffs/11-simplifile-sync-io-in-cmdeffect.md)
+  - [Client-side markdown rendering](./decisions/tradeoffs/12-client-side-markdown-rendering.md)
 - [Technical Debt](./decisions/tech-debt.md)

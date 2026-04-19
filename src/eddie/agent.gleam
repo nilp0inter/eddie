@@ -306,6 +306,10 @@ fn dispatch_tool_calls(
   let #(new_state, tool_return_parts) =
     list.fold(tool_calls, #(state, []), fn(acc, tc) {
       let #(current_state, parts) = acc
+
+      // Notify subscribers about the tool call
+      notify_tool_call(state: current_state, tool_call: tc)
+
       let #(updated_ctx, result) =
         context.handle_tool_call(
           context: current_state.context,
@@ -323,6 +327,14 @@ fn dispatch_tool_calls(
           content: result_text,
           tool_call_id: tc.tool_call_id,
         )
+
+      // Notify subscribers about the tool result
+      notify_tool_result(
+        state: current_state,
+        tool_name: tc.tool_name,
+        result: result_text,
+      )
+
       let updated_state = AgentState(..current_state, context: updated_ctx)
       #(updated_state, [part, ..parts])
     })
@@ -375,6 +387,39 @@ fn notify_subscribers(
       list.each(state.subscribers, fn(sub) { process.send(sub, html_payload) })
     }
   }
+}
+
+/// Notify subscribers about a tool call being made.
+fn notify_tool_call(
+  state state: AgentState,
+  tool_call tool_call: ToolCall,
+) -> Nil {
+  let payload =
+    json.to_string(
+      json.object([
+        #("type", json.string("tool_call")),
+        #("name", json.string(tool_call.tool_name)),
+        #("args", json.string(tool_call.arguments_json)),
+      ]),
+    )
+  list.each(state.subscribers, fn(sub) { process.send(sub, payload) })
+}
+
+/// Notify subscribers about a tool result.
+fn notify_tool_result(
+  state state: AgentState,
+  tool_name tool_name: String,
+  result result: String,
+) -> Nil {
+  let payload =
+    json.to_string(
+      json.object([
+        #("type", json.string("tool_result")),
+        #("name", json.string(tool_name)),
+        #("result", json.string(result)),
+      ]),
+    )
+  list.each(state.subscribers, fn(sub) { process.send(sub, payload) })
 }
 
 // ============================================================================
