@@ -8,6 +8,7 @@
 /// and looked up by the server without holding a stale reference.
 import gleam/dict.{type Dict}
 import gleam/list
+import gleam/option
 import gleam/result
 
 import eddie/agent.{
@@ -15,7 +16,7 @@ import eddie/agent.{
 }
 import eddie/http as eddie_http
 
-import eddie_shared/protocol.{type AgentInfo, AgentInfo}
+import eddie_shared/agent_info.{type AgentInfo, AgentInfo}
 
 import gleam/erlang/process.{type Subject}
 import gleam/http/request.{type Request}
@@ -110,12 +111,23 @@ fn handle_message(
     }
 
     ListAgents(reply_to) -> {
-      let root_info = AgentInfo(id: "root", label: "Root")
+      let root_info =
+        AgentInfo(
+          id: "root",
+          label: "Root",
+          parent_id: option.None,
+          status: agent_info.AgentIdle,
+        )
       let child_infos =
         dict.to_list(state.children)
         |> list.map(fn(entry) {
           let #(id, #(_, label)) = entry
-          AgentInfo(id: id, label: label)
+          AgentInfo(
+            id: id,
+            label: label,
+            parent_id: option.Some("root"),
+            status: agent_info.AgentIdle,
+          )
         })
       process.send(reply_to, [root_info, ..child_infos])
       actor.continue(state)

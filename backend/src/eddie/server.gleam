@@ -359,8 +359,9 @@ fn handle_client_message(state state: WsState, text text: String) -> Nil {
       agent.send_message(subject: state.agent, text: text)
       Nil
     }
-    Ok(protocol.SpawnAgent(id:, label:, system_prompt:)) -> {
-      handle_spawn_agent(state, id, label, system_prompt)
+    Ok(protocol.SpawnRootAgent) -> {
+      // TODO(phase4): implement root agent spawning via control WebSocket
+      Nil
     }
     Ok(command) -> {
       // Map other ClientCommands to widget events
@@ -393,7 +394,7 @@ fn handle_spawn_agent(
     Ok(_) -> {
       // Broadcast updated agent list to all connected clients
       let agents = agent_tree.list_agents(tree: state.tree)
-      let event = protocol.AgentListChanged(agents: agents)
+      let event = protocol.AgentTreeChanged(roots: [])
       let payload = protocol.server_events_to_json_string([event])
       registry_broadcast(state.registry, payload)
     }
@@ -504,8 +505,8 @@ fn dispatch_client_command(
         "close_read_file",
         "{\"path\": " <> json.to_string(json.string(path)) <> "}",
       ))
-    // SendUserMessage and SpawnAgent are handled above
-    protocol.SendUserMessage(..) | protocol.SpawnAgent(..) -> Error(Nil)
+    // SendUserMessage and SpawnRootAgent are handled above
+    protocol.SendUserMessage(..) | protocol.SpawnRootAgent -> Error(Nil)
   }
   case result {
     Ok(#(event_name, args_json)) -> {

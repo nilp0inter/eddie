@@ -5,10 +5,10 @@
 /// Supports multiple agents — each agent has its own WebSocket connection
 /// and cached state. The user switches between agents via a tab bar.
 import eddie_shared/message
+import eddie_shared/agent_info.{type AgentInfo, AgentInfo}
 import eddie_shared/protocol.{
-  type AgentInfo, type ClientCommand, type DirectorySnapshot, type FileSnapshot,
+  type ClientCommand, type DirectorySnapshot, type FileSnapshot,
   type LogItemSnapshot, type ServerEvent, type TaskSnapshot, type TokenRecord,
-  AgentInfo,
 }
 import eddie_shared/task
 import gleam/dict.{type Dict}
@@ -119,7 +119,7 @@ fn empty_model() -> Model {
     connection: Connecting,
     ws_generation: 0,
     active_agent: "root",
-    agent_list: [AgentInfo(id: "root", label: "Root")],
+    agent_list: [AgentInfo(id: "root", label: "Root", parent_id: None, status: agent_info.AgentIdle)],
     agents: dict.from_list([#("root", empty_agent_state())]),
     chat_input: "",
     active_panel: None,
@@ -325,7 +325,7 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
 
     AgentListReceived(text) -> {
-      case json.parse(text, decode.list(protocol.agent_info_decoder())) {
+      case json.parse(text, decode.list(agent_info.agent_info_decoder())) {
         Ok(agents) -> #(Model(..model, agent_list: agents), effect.none())
         Error(_) -> #(model, effect.none())
       }
@@ -371,7 +371,7 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             "" -> "You are " <> label <> ", a helpful AI assistant."
             p -> p
           }
-          let command = protocol.SpawnAgent(id:, label:, system_prompt: prompt)
+          let command = protocol.SpawnRootAgent
           #(
             Model(
               ..model,
@@ -531,9 +531,9 @@ fn apply_server_event(state: AgentState, event: ServerEvent) -> AgentState {
     protocol.AgentError(..) ->
       AgentState(..state, thinking: False, active_tool_calls: dict.new())
 
-    // AgentListChanged and AgentSpawnFailed are handled at the Model level,
+    // AgentTreeChanged and AgentSpawnFailed are handled at the Model level,
     // not the per-agent state level — they pass through here unchanged.
-    protocol.AgentListChanged(..) | protocol.AgentSpawnFailed(..) -> state
+    protocol.AgentTreeChanged(..) | protocol.AgentSpawnFailed(..) | protocol.ChildAgentStatusChanged(..) | protocol.SubagentsUpdated(..) | protocol.MailReceived(..) | protocol.MailSent(..) | protocol.MailboxUpdated(..) -> state
   }
 }
 
@@ -541,7 +541,7 @@ fn apply_server_event(state: AgentState, event: ServerEvent) -> AgentState {
 fn apply_model_events(model: Model, events: List(ServerEvent)) -> Model {
   list.fold(events, model, fn(m, event) {
     case event {
-      protocol.AgentListChanged(agents:) -> Model(..m, agent_list: agents)
+      protocol.AgentTreeChanged(..) -> m
       _ -> m
     }
   })

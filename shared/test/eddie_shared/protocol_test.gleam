@@ -1,3 +1,5 @@
+import eddie_shared/agent_info
+import eddie_shared/mailbox
 import eddie_shared/message
 import eddie_shared/protocol
 import eddie_shared/task
@@ -348,21 +350,123 @@ pub fn close_read_file_roundtrip_test() {
 // ============================================================================
 
 pub fn agent_info_roundtrip_test() {
-  let info = protocol.AgentInfo(id: "child-1", label: "Research Agent")
+  let info =
+    agent_info.AgentInfo(
+      id: "child-1",
+      label: "Research Agent",
+      parent_id: Some("root-abc"),
+      status: agent_info.AgentRunning,
+    )
   info
-  |> protocol.agent_info_to_json
+  |> agent_info.agent_info_to_json
   |> json.to_string
-  |> json.parse(protocol.agent_info_decoder())
+  |> json.parse(agent_info.agent_info_decoder())
   |> should.equal(Ok(info))
 }
 
-pub fn agent_list_changed_roundtrip_test() {
+pub fn agent_info_no_parent_roundtrip_test() {
+  let info =
+    agent_info.AgentInfo(
+      id: "root-1",
+      label: "Root Agent",
+      parent_id: None,
+      status: agent_info.AgentIdle,
+    )
+  info
+  |> agent_info.agent_info_to_json
+  |> json.to_string
+  |> json.parse(agent_info.agent_info_decoder())
+  |> should.equal(Ok(info))
+}
+
+pub fn agent_tree_node_roundtrip_test() {
+  let node =
+    agent_info.AgentTreeNode(
+      info: agent_info.AgentInfo(
+        id: "root-1",
+        label: "Root",
+        parent_id: None,
+        status: agent_info.AgentIdle,
+      ),
+      children: [
+        agent_info.AgentTreeNode(
+          info: agent_info.AgentInfo(
+            id: "child-1",
+            label: "Child",
+            parent_id: Some("root-1"),
+            status: agent_info.AgentRunning,
+          ),
+          children: [
+            agent_info.AgentTreeNode(
+              info: agent_info.AgentInfo(
+                id: "grandchild-1",
+                label: "Grandchild",
+                parent_id: Some("child-1"),
+                status: agent_info.AgentCompleted,
+              ),
+              children: [],
+            ),
+          ],
+        ),
+      ],
+    )
+  node
+  |> agent_info.agent_tree_node_to_json
+  |> json.to_string
+  |> json.parse(agent_info.agent_tree_node_decoder())
+  |> should.equal(Ok(node))
+}
+
+pub fn agent_status_idle_roundtrip_test() {
+  agent_info.AgentIdle
+  |> agent_info.status_to_json
+  |> json.to_string
+  |> json.parse(agent_info.status_decoder())
+  |> should.equal(Ok(agent_info.AgentIdle))
+}
+
+pub fn agent_status_running_roundtrip_test() {
+  agent_info.AgentRunning
+  |> agent_info.status_to_json
+  |> json.to_string
+  |> json.parse(agent_info.status_decoder())
+  |> should.equal(Ok(agent_info.AgentRunning))
+}
+
+pub fn agent_status_completed_roundtrip_test() {
+  agent_info.AgentCompleted
+  |> agent_info.status_to_json
+  |> json.to_string
+  |> json.parse(agent_info.status_decoder())
+  |> should.equal(Ok(agent_info.AgentCompleted))
+}
+
+pub fn agent_status_error_roundtrip_test() {
+  agent_info.AgentError
+  |> agent_info.status_to_json
+  |> json.to_string
+  |> json.parse(agent_info.status_decoder())
+  |> should.equal(Ok(agent_info.AgentError))
+}
+
+pub fn agent_tree_changed_roundtrip_test() {
   roundtrip_server_event(
-    protocol.AgentListChanged(agents: [
-      protocol.AgentInfo(id: "root", label: "Root"),
-      protocol.AgentInfo(id: "research", label: "Research"),
+    protocol.AgentTreeChanged(roots: [
+      agent_info.AgentTreeNode(
+        info: agent_info.AgentInfo(
+          id: "root-1",
+          label: "Root",
+          parent_id: None,
+          status: agent_info.AgentIdle,
+        ),
+        children: [],
+      ),
     ]),
   )
+}
+
+pub fn agent_tree_changed_empty_roundtrip_test() {
+  roundtrip_server_event(protocol.AgentTreeChanged(roots: []))
 }
 
 pub fn agent_spawn_failed_roundtrip_test() {
@@ -372,10 +476,100 @@ pub fn agent_spawn_failed_roundtrip_test() {
   ))
 }
 
-pub fn spawn_agent_roundtrip_test() {
-  roundtrip_client_command(protocol.SpawnAgent(
-    id: "research",
-    label: "Research Agent",
-    system_prompt: "You are a research assistant.",
+pub fn child_agent_status_changed_roundtrip_test() {
+  roundtrip_server_event(protocol.ChildAgentStatusChanged(
+    agent_id: "child-1",
+    status: agent_info.AgentRunning,
   ))
+}
+
+pub fn subagents_updated_roundtrip_test() {
+  roundtrip_server_event(
+    protocol.SubagentsUpdated(children: [
+      agent_info.AgentInfo(
+        id: "child-1",
+        label: "Research",
+        parent_id: Some("root-1"),
+        status: agent_info.AgentRunning,
+      ),
+    ]),
+  )
+}
+
+pub fn spawn_root_agent_roundtrip_test() {
+  roundtrip_client_command(protocol.SpawnRootAgent)
+}
+
+// ============================================================================
+// Mailbox roundtrip tests
+// ============================================================================
+
+pub fn mail_message_roundtrip_test() {
+  let msg =
+    mailbox.MailMessage(
+      id: "msg-1",
+      from: "parent-1",
+      to: "child-1",
+      content: "Please investigate the auth module",
+      timestamp: 1_718_000_000_000,
+      read: False,
+    )
+  msg
+  |> mailbox.mail_message_to_json
+  |> json.to_string
+  |> json.parse(mailbox.mail_message_decoder())
+  |> should.equal(Ok(msg))
+}
+
+pub fn mail_received_roundtrip_test() {
+  roundtrip_server_event(
+    protocol.MailReceived(message: mailbox.MailMessage(
+      id: "msg-2",
+      from: "child-1",
+      to: "parent-1",
+      content: "Auth module uses JWT",
+      timestamp: 1_718_000_001_000,
+      read: True,
+    )),
+  )
+}
+
+pub fn mail_sent_roundtrip_test() {
+  roundtrip_server_event(
+    protocol.MailSent(message: mailbox.MailMessage(
+      id: "msg-3",
+      from: "parent-1",
+      to: "child-1",
+      content: "Good work",
+      timestamp: 1_718_000_002_000,
+      read: False,
+    )),
+  )
+}
+
+pub fn mailbox_updated_roundtrip_test() {
+  roundtrip_server_event(
+    protocol.MailboxUpdated(
+      inbox: [
+        mailbox.MailMessage(
+          id: "msg-4",
+          from: "child-1",
+          to: "parent-1",
+          content: "Done",
+          timestamp: 1_718_000_003_000,
+          read: True,
+        ),
+      ],
+      outbox: [
+        mailbox.MailMessage(
+          id: "msg-5",
+          from: "parent-1",
+          to: "child-1",
+          content: "Start",
+          timestamp: 1_718_000_000_000,
+          read: True,
+        ),
+      ],
+    ),
+  )
 }

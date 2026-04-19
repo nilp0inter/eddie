@@ -10,6 +10,8 @@ import gleam/dynamic/decode
 import gleam/json
 import gleam/option.{type Option, None, Some}
 
+import eddie_shared/agent_info.{type AgentInfo, type AgentStatus, type AgentTreeNode}
+import eddie_shared/mailbox.{type MailMessage}
 import eddie_shared/message.{type Message}
 import eddie_shared/task.{type TaskStatus}
 import eddie_shared/turn_result.{type TurnResult}
@@ -64,10 +66,20 @@ pub type ServerEvent {
   TurnCompleted(result: TurnResult)
   /// An unrecoverable agent error.
   AgentError(reason: String)
-  /// The list of available agents changed (agent spawned).
-  AgentListChanged(agents: List(AgentInfo))
+  /// The agent tree structure changed (agent spawned/removed).
+  AgentTreeChanged(roots: List(AgentTreeNode))
   /// A spawn request failed.
   AgentSpawnFailed(id: String, reason: String)
+  /// A child agent's status changed.
+  ChildAgentStatusChanged(agent_id: String, status: AgentStatus)
+  /// The subagents list for a parent agent was updated.
+  SubagentsUpdated(children: List(AgentInfo))
+  /// A mail message was received in this agent's inbox.
+  MailReceived(message: MailMessage)
+  /// A mail message was sent from this agent's outbox.
+  MailSent(message: MailMessage)
+  /// Full mailbox state update.
+  MailboxUpdated(inbox: List(MailMessage), outbox: List(MailMessage))
 }
 
 // ============================================================================
@@ -112,17 +124,8 @@ pub type ClientCommand {
   ReadFile(path: String)
   /// Close a read file in the file explorer.
   CloseReadFile(path: String)
-  /// Spawn a new child agent.
-  SpawnAgent(id: String, label: String, system_prompt: String)
-}
-
-// ============================================================================
-// Agent metadata
-// ============================================================================
-
-/// Information about an available agent.
-pub type AgentInfo {
-  AgentInfo(id: String, label: String)
+  /// Spawn a new root agent (server generates UUID + default label).
+  SpawnRootAgent
 }
 
 // ============================================================================
@@ -248,10 +251,7 @@ pub fn token_record_to_json(record: TokenRecord) -> json.Json {
 }
 
 pub fn agent_info_to_json(info: AgentInfo) -> json.Json {
-  json.object([
-    #("id", json.string(info.id)),
-    #("label", json.string(info.label)),
-  ])
+  agent_info.agent_info_to_json(info)
 }
 
 pub fn server_event_to_json(event: ServerEvent) -> json.Json {
@@ -360,16 +360,43 @@ pub fn server_event_to_json(event: ServerEvent) -> json.Json {
         #("type", json.string("agent_error")),
         #("reason", json.string(reason)),
       ])
-    AgentListChanged(agents) ->
+    AgentTreeChanged(roots) ->
       json.object([
-        #("type", json.string("agent_list_changed")),
-        #("agents", json.array(agents, agent_info_to_json)),
+        #("type", json.string("agent_tree_changed")),
+        #("roots", json.array(roots, agent_info.agent_tree_node_to_json)),
       ])
     AgentSpawnFailed(id, reason) ->
       json.object([
         #("type", json.string("agent_spawn_failed")),
         #("id", json.string(id)),
         #("reason", json.string(reason)),
+      ])
+    ChildAgentStatusChanged(agent_id, status) ->
+      json.object([
+        #("type", json.string("child_agent_status_changed")),
+        #("agent_id", json.string(agent_id)),
+        #("status", agent_info.status_to_json(status)),
+      ])
+    SubagentsUpdated(children) ->
+      json.object([
+        #("type", json.string("subagents_updated")),
+        #("children", json.array(children, agent_info_to_json)),
+      ])
+    MailReceived(message) ->
+      json.object([
+        #("type", json.string("mail_received")),
+        #("message", mailbox.mail_message_to_json(message)),
+      ])
+    MailSent(message) ->
+      json.object([
+        #("type", json.string("mail_sent")),
+        #("message", mailbox.mail_message_to_json(message)),
+      ])
+    MailboxUpdated(inbox, outbox) ->
+      json.object([
+        #("type", json.string("mailbox_updated")),
+        #("inbox", json.array(inbox, mailbox.mail_message_to_json)),
+        #("outbox", json.array(outbox, mailbox.mail_message_to_json)),
       ])
   }
 }
@@ -468,13 +495,8 @@ pub fn client_command_to_json(command: ClientCommand) -> json.Json {
         #("type", json.string("close_read_file")),
         #("path", json.string(path)),
       ])
-    SpawnAgent(id, label, system_prompt) ->
-      json.object([
-        #("type", json.string("spawn_agent")),
-        #("id", json.string(id)),
-        #("label", json.string(label)),
-        #("system_prompt", json.string(system_prompt)),
-      ])
+    SpawnRootAgent ->
+      json.object([#("type", json.string("spawn_root_agent"))])
   }
 }
 
@@ -555,9 +577,7 @@ pub fn token_record_decoder() -> decode.Decoder(TokenRecord) {
 }
 
 pub fn agent_info_decoder() -> decode.Decoder(AgentInfo) {
-  use id <- decode.field("id", decode.string)
-  use label <- decode.field("label", decode.string)
-  decode.success(AgentInfo(id:, label:))
+  agent_info.agent_info_decoder()
 }
 
 pub fn server_event_decoder() -> decode.Decoder(ServerEvent) {
@@ -661,14 +681,48 @@ pub fn server_event_decoder() -> decode.Decoder(ServerEvent) {
       use reason <- decode.field("reason", decode.string)
       decode.success(AgentError(reason:))
     }
-    "agent_list_changed" -> {
-      use agents <- decode.field("agents", decode.list(agent_info_decoder()))
-      decode.success(AgentListChanged(agents:))
+    "agent_tree_changed" -> {
+      use roots <- decode.field(
+        "roots",
+        decode.list(agent_info.agent_tree_node_decoder()),
+      )
+      decode.success(AgentTreeChanged(roots:))
     }
     "agent_spawn_failed" -> {
       use id <- decode.field("id", decode.string)
       use reason <- decode.field("reason", decode.string)
       decode.success(AgentSpawnFailed(id:, reason:))
+    }
+    "child_agent_status_changed" -> {
+      use agent_id <- decode.field("agent_id", decode.string)
+      use status <- decode.field("status", agent_info.status_decoder())
+      decode.success(ChildAgentStatusChanged(agent_id:, status:))
+    }
+    "subagents_updated" -> {
+      use children <- decode.field(
+        "children",
+        decode.list(agent_info_decoder()),
+      )
+      decode.success(SubagentsUpdated(children:))
+    }
+    "mail_received" -> {
+      use message <- decode.field("message", mailbox.mail_message_decoder())
+      decode.success(MailReceived(message:))
+    }
+    "mail_sent" -> {
+      use message <- decode.field("message", mailbox.mail_message_decoder())
+      decode.success(MailSent(message:))
+    }
+    "mailbox_updated" -> {
+      use inbox <- decode.field(
+        "inbox",
+        decode.list(mailbox.mail_message_decoder()),
+      )
+      use outbox <- decode.field(
+        "outbox",
+        decode.list(mailbox.mail_message_decoder()),
+      )
+      decode.success(MailboxUpdated(inbox:, outbox:))
     }
     _ -> decode.failure(TurnStarted, "ServerEvent")
   }
@@ -743,12 +797,7 @@ pub fn client_command_decoder() -> decode.Decoder(ClientCommand) {
       use path <- decode.field("path", decode.string)
       decode.success(CloseReadFile(path:))
     }
-    "spawn_agent" -> {
-      use id <- decode.field("id", decode.string)
-      use label <- decode.field("label", decode.string)
-      use system_prompt <- decode.field("system_prompt", decode.string)
-      decode.success(SpawnAgent(id:, label:, system_prompt:))
-    }
+    "spawn_root_agent" -> decode.success(SpawnRootAgent)
     _ -> decode.failure(ClearGoal, "ClientCommand")
   }
 }
