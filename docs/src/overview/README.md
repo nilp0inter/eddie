@@ -36,6 +36,15 @@ The **agent loop** is the core cycle:
 | State mutation | Mutable models (in-place) | Immutable models (update returns new value) |
 | Type erasure | Python `Any` + duck typing | Opaque type with closures over typed internals |
 
+## Widget tree
+
+The agent's context is composed from a tree of widgets. Two are implemented so far:
+
+- **SystemPrompt** — provides the agent's identity and framing text as a system message
+- **ConversationLog** — manages task-partitioned conversation history, memory management, and the task protocol that governs when non-task tools can be called
+
+Additional widgets (goal, token usage, file explorer) are planned for Phase 6.
+
 ## Module map
 
 See [Components](./components.md) for the full breakdown.

@@ -42,41 +42,28 @@ Reference files:
 
 ---
 
-## Phase 2: SystemPrompt and ConversationLog Widgets
+## Phase 2: SystemPrompt and ConversationLog Widgets ✅
 
-**Goal:** The two widgets needed for minimal chat. Pure functional, testable without LLM.
+**Status:** Complete — 64 tests passing (28 Phase 1 + 36 Phase 2), glinter clean (expected warnings only).
 
-**Corresponds to:** `calipso/widgets/system_prompt.py`, `calipso/widgets/conversation_log.py`
+**Implemented:**
+- `src/eddie/widgets/system_prompt.gleam` — `SystemPromptModel`, `SetSystemPrompt`/`ResetSystemPrompt` msgs, `create(text:)`/`create_default()` factories, UI-only (no LLM tools), default text with Eddie identity
+- `src/eddie/widgets/conversation_log.gleam` — Full task lifecycle (`Pending -> InProgress -> Done`), `ConversationLogModel` with reversed-list prepend strategy, 14 message types, 6 LLM tools (conditional availability based on state), `check_protocol` enforcement, `view_messages` with task collapsing/expansion, `from_llm`/`from_ui` anticorruption with `gleam/dynamic/decode`
 
-### Files to create
+**Key design decisions made during implementation:**
+- Log and task_order use reversed lists (prepend during update, reverse during view) for efficient append
+- Memories stored reversed internally, displayed in original order via `list.reverse`
+- `check_protocol` extracted as a standalone public function (not embedded in dispatch) for Phase 3 Context to call
+- `current_owning_task_id` exposed for Phase 3 Context to tag log items
+- `from_ui` handlers extracted into named functions to reduce nesting
+- `set_task` helper reduces boilerplate for task dict updates
+- `decode_field_string`/`decode_field_int`/`decode_ui_int` helpers reduce decoder boilerplate
+- `task_id_schema()` shared across tool definitions to avoid duplication
+- Tool definitions constructed lazily per `view_tools` call (no module-level state)
 
-**`src/eddie/widgets/system_prompt.gleam`**
-- Model: `SystemPromptModel(text: String)`
-- Msgs: `SetSystemPrompt(text) | ResetSystemPrompt`
-- `view_messages` yields a single `SystemPart`
-- `view_html` renders a textarea (Lustre elements)
-- UI-only (no LLM tools)
-- `create_system_prompt(text) -> WidgetHandle`
-
-**`src/eddie/widgets/conversation_log.gleam`** — Most complex widget
-- `TaskStatus`: `Pending | InProgress | Done`
-- `Task(id, description, status, memories)`
-- `LogItem`: `UserMessageItem | ResponseItem | ToolResultsItem` (each with `owning_task_id`)
-- `ConversationLogModel(log, tasks, task_order, next_id, active_task_id, picks_for_next_request)`
-- Msgs: `CreateTask | StartTask | TaskMemoryAppend | CloseCurrentTask | PickTask | RemoveTask | UserMessageReceived | ResponseReceived | ToolResultsReceived | ConsumePicks | EditMemory | RemoveMemory | ToggleTaskExpanded | UpdateTaskStatus`
-- LLM tools: `create_task`, `start_task`, `task_memory`, `close_current_task`, `task_pick`, `remove_task`
-- `check_protocol(model, tool_name, protocol_free_tools) -> Option(String)` — returns error message if violated
-- `view_messages` collapses done tasks to memories, expands picked tasks for one request
-- `create_conversation_log() -> WidgetHandle`
-
-Key difference from Calipso: all models are immutable (update returns new value). Use `List` with prepend for append-heavy log.
-
-### Tests
-- SystemPrompt: create, set, reset, verify view_messages
-- Task lifecycle: create -> start -> add memory -> close, verify state transitions
-- Protocol violations: start when active, close without memory, tool calls outside tasks
-- view_messages: collapsed done tasks, picked task expansion
-- from_llm/from_ui anticorruption layers
+**Tests cover:**
+- SystemPrompt: create with custom/default text, view_messages, dispatch_llm error, set/reset via UI, unknown event
+- ConversationLog: full task lifecycle (create → start → memory → close), protocol violations (start when active, close without memory, close no active task, memory no active task, remove non-pending, pick non-done, start non-pending), view_messages (protocol rules, collapsing, picked expansion, consume picks, open tasks block, in-progress not collapsed), from_llm/from_ui (unknown tool, UI create/toggle, empty description ignored), ID sequencing
 
 ---
 

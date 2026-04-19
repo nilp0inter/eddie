@@ -23,7 +23,6 @@
       # are intentionally absent from the `ci` shell so they are never
       # fetched on the CI runner.
       devOnlyPackages = with pkgs; [
-        erlang-ls      # erlang language server
       ];
     in
     {

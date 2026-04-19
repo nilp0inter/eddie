@@ -1,5 +1,80 @@
 # Components
 
+## Widgets (Phase 2)
+
+### `eddie/widgets/system_prompt`
+
+Identity and framing text for the agent. The simplest widget — holds a single text string yielded as a `SystemPart` to the LLM.
+
+- **Model:** `SystemPromptModel(text: String)`
+- **Messages:** `SetSystemPrompt(text)` | `ResetSystemPrompt`
+- **LLM tools:** none — UI-only widget
+- **Frontend events:** `set_system_prompt` (carries `{text: "..."}`) and `reset_system_prompt`
+- **Factory:** `create(text:)` or `create_default()` (default text establishes the Eddie identity and workflow instructions)
+
+The update function is trivial: `SetSystemPrompt` replaces the text, `ResetSystemPrompt` reverts to the default. Both return `CmdNone` since there's no LLM to respond to.
+
+### `eddie/widgets/conversation_log`
+
+Task-partitioned conversation history with memory management. The most complex widget — manages the full task lifecycle and controls what the LLM sees in its context window.
+
+**Core concept:** the conversation is partitioned by **tasks**. A task moves through `Pending → InProgress → Done`. At most one task can be `InProgress` at any time. When a task closes, its full conversation span (tool calls, results, intermediate responses) collapses to just the task description and its **memories** — short LLM-authored summaries recorded during the task. The LLM can request one-shot re-expansion of a done task via `task_pick`.
+
+**Types:**
+
+- `TaskStatus` — `Pending` | `InProgress` | `Done`
+- `Task(id, description, status, memories, ui_expanded)` — memories stored as reversed list (prepend during update, reverse when viewing)
+- `LogItem` — `UserMessageItem` | `ResponseItem` | `ToolResultsItem`, each carrying an `owning_task_id`
+- `ConversationLogModel` — `log`, `tasks` dict, `task_order`, `next_id`, `active_task_id`, `picks_for_next_request` set
+
+**Messages (14 variants):**
+
+| Message | Source | Purpose |
+|---|---|---|
+| `CreateTask` | LLM / UI | Plan a unit of work |
+| `StartTask` | LLM / UI | Begin work (sets `active_task_id`) |
+| `TaskMemoryAppend` | LLM / UI | Record a finding (append-only while in progress) |
+| `CloseCurrentTask` | LLM / UI | Finish task (requires ≥1 memory) |
+| `PickTask` | LLM / UI | Expand done task's log for next request only |
+| `RemoveTask` | LLM / UI | Delete a pending task (frozen once started) |
+| `EditMemory` | UI | Modify an existing memory |
+| `RemoveMemory` | UI | Delete a memory |
+| `ToggleTaskExpanded` | UI | Visual toggle (no effect on LLM view) |
+| `UpdateTaskStatus` | UI | Checkbox-driven transitions (delegates to Start/Close logic) |
+| `UserMessageReceived` | Internal | Sent via `send()` to log user input |
+| `ResponseReceived` | Internal | Sent via `send()` to log LLM response |
+| `ToolResultsReceived` | Internal | Sent via `send()` to log tool results |
+| `ConsumePicks` | Internal | Clear picks after a request/response round-trip |
+
+**LLM tools (conditional availability):**
+
+| Tool | Available when |
+|---|---|
+| `create_task` | Always |
+| `remove_task` | Any pending task exists |
+| `task_pick` | Any done task exists |
+| `start_task` | No active task AND any pending task exists |
+| `task_memory` | A task is in progress |
+| `close_current_task` | A task is in progress AND it has ≥1 memory |
+
+**Task protocol enforcement:**
+
+`check_protocol(model, tool_name, protocol_free_tools)` returns `Some(error_message)` if a tool call violates the protocol, `None` if allowed. The Context compositor (Phase 3) will call this before dispatching any tool call. Task management tools (`create_task`, `remove_task`, `task_pick`) are always allowed. All other tools require an active task unless they appear in the `protocol_free_tools` set.
+
+The task protocol rules are injected as a `SystemPart` at the start of `view_messages`, instructing the LLM on the lifecycle, memory discipline, and constraints.
+
+**`view_messages` collapsing logic:**
+
+Log items are walked in chronological order, grouped by consecutive `owning_task_id`. Each group is rendered as:
+- **No task** → raw messages (user prompts, responses, tool results)
+- **In-progress task** → raw messages (full visibility while working)
+- **Done task** → collapsed block (task description + memories only), unless picked for expansion
+- **Picked done task** → collapsed block + raw messages (one-shot expansion)
+
+An "Open tasks" block listing pending and in-progress tasks is appended at the end.
+
+**Factory:** `create()` — returns a `WidgetHandle` with an empty model.
+
 ## Core types (Phase 1)
 
 ### `eddie/cmd`
