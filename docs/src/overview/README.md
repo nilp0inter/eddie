@@ -57,6 +57,10 @@ The **Context** (`eddie/context`) is the root compositor that holds the widget t
 
 The **LLM bridge** (`eddie/llm`) converts between Eddie types and glopenai types in a sans-IO style — it builds HTTP requests and parses responses without performing network IO. The **HTTP layer** (`eddie/http`) is the only module that touches the network.
 
+## Structured output
+
+The **structured output layer** (`eddie/structured_output`) extracts typed Gleam values from LLM responses. It wraps a sextant schema in an `OutputSchema(a)` and offers two strategies: **tool-call** (register a fake tool, validate its arguments) and **native** (send `response_format` with json_schema, validate the text response). Both share a retry loop that feeds validation errors back to the LLM as structured feedback. The module follows the same sans-IO pattern as the LLM bridge — the caller injects a `send_fn`.
+
 ## Module map
 
 See [Components](./components.md) for the full breakdown.

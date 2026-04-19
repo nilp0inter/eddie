@@ -32,6 +32,18 @@ Once a turn starts, there is no way to cancel it from the browser or from the se
 
 `agent.gleam` uses `decode.new_primitive_decoder("dynamic", fn(d) { Ok(d) })` to create a decoder that passes through the raw `Dynamic` value from `json.parse`. This is a workaround for the absence of a built-in "parse JSON to Dynamic without decoding" function in `gleam_json`. It works correctly but is non-obvious. If `gleam_json` or `gleam_stdlib` adds a `json.parse_to_dynamic` or equivalent, this should be replaced.
 
+## Structured output not integrated into the agent turn loop
+
+`structured_output.extract` is a standalone function with its own `send_fn` parameter and retry loop, separate from the agent's turn loop. To use structured output during a turn, the caller would need to call `extract` outside the agent actor (or inject it as a tool effect), which means the extraction's intermediate state (retry messages, validation errors) is invisible to the conversation log and the subscriber notification system. Integrating structured output as a first-class turn step — where retries appear in the conversation log and trigger HTML updates — would require threading the Context through the extraction loop or running extraction as a sub-turn within the agent. This was deferred because the extraction use case (Phase 6 structured tools, structured agent responses) is not yet defined.
+
+## `strip_dollar_schema` loses key ordering
+
+`strip_dollar_schema` decodes the JSON schema to `Dict(String, Dynamic)`, filters out the `$schema` key, and re-encodes. Erlang maps (which back Gleam's `Dict`) do not preserve insertion order, so the output keys may appear in a different order than sextant produced them. This doesn't affect correctness (JSON object key order is not significant per spec) but makes the generated schema harder to diff or debug visually. If schema readability becomes important (e.g., for debugging failed extractions), consider building the schema without `$schema` in the first place.
+
+## Duplicated `json_to_dynamic` identity decoder
+
+`structured_output.gleam` contains its own `json_to_dynamic` function using `decode.new_primitive_decoder("dynamic", fn(d) { Ok(d) })`, identical to the one in `agent.gleam`. Both work around the absence of a built-in "parse JSON to Dynamic" in `gleam_json`. If a third module needs this, it should be extracted to a shared utility. See also the existing `json_to_dynamic` entry below.
+
 ## Spawned helper process for turn execution
 
 The server spawns a `process.spawn` helper to call `agent.run_turn` because `AgentMessage` is opaque — the server cannot construct a `RunTurn` message directly and must go through the blocking public API. This means each user turn creates an extra BEAM process that exists only to bridge the call. The helper process is very lightweight (a single function call) but it introduces an indirection: the WebSocket handler sends no message to the agent directly for turns; instead, the spawned process calls `agent.run_turn`, and HTML updates flow back separately through the subscriber mechanism. An alternative would be to expose a public message constructor on the agent, but that would leak the internal protocol.

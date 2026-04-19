@@ -155,6 +155,34 @@ An "Open tasks" block listing pending and in-progress tasks is appended at the e
 
 **Factory:** `create()` — returns a `WidgetHandle` with an empty model. For Context's use, `init()` returns a typed `ConversationLog` opaque type with direct dispatch, protocol checking, and owning task ID access (see [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md)).
 
+## Structured Output (Phase 5)
+
+### `eddie/structured_output`
+
+Sans-IO structured output extraction — a mini pydantic-ai for Eddie. Extracts typed Gleam values from LLM responses using sextant schemas, with automatic retry on validation failure.
+
+- **`OutputSchema(a)`** — wraps a `sextant.JsonSchema(a)` with a name and description. The sextant schema provides both JSON Schema generation (for the LLM) and validation/decoding (for the response)
+- **`Strategy`** — selects how the schema is presented to the LLM:
+  - `ToolCallStrategy` — registers a fake tool whose parameters ARE the schema; the LLM "calls" the tool and Eddie validates the arguments
+  - `NativeStrategy` — sends the schema as `response_format` (json_schema); the LLM returns JSON text and Eddie validates it
+- **`extract(config, messages, output, strategy, max_retries, send_fn)`** — the main entry point. Takes an injectable `send_fn` (same pattern as `agent.gleam`) for testability. Returns `Result(a, StructuredOutputError)`
+- **`StructuredOutputError`** — `SendError` | `ApiError` | `EmptyResponse` | `MaxRetriesExceeded(last_errors)` | `UnexpectedResponse`
+
+**Extraction pipeline:**
+
+1. Build a glopenai request with either a tool definition (tool-call) or response_format (native)
+2. Send via the injected `send_fn`
+3. Parse the glopenai response; route to strategy-specific validation
+4. Parse JSON (stripping markdown fences if present), validate with `sextant.run`
+5. On success: return `Ok(value)`. On validation failure: build structured error feedback and retry
+6. Retry messages differ by strategy: tool-call echoes back the failed tool call + `RetryPart`; native sends a `UserPart` with error details
+
+**Utilities:**
+
+- `strip_markdown_fences` — handles `` ```json `` and `` ``` `` wrapping that some models add around JSON output
+- `strip_dollar_schema` — removes the `$schema` key from sextant-generated JSON Schema (tool parameters and response_format schemas don't include it)
+- `encode_dynamic` — Erlang FFI (`eddie_ffi.dynamic_to_json`) to re-encode a decoded Dynamic value back to `json.Json`, matching glopenai's approach
+
 ## Context and LLM (Phase 3)
 
 ### `eddie/context`

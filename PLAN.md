@@ -127,34 +127,42 @@ Reference files:
 
 ---
 
-## Phase 5: Structured Output Layer
+## Phase 5: Structured Output Layer ✅
+
+**Status:** Complete — 113 tests passing (98 Phase 1-4 + 15 Phase 5), glinter clean (expected warnings only).
 
 **Goal:** Mini pydantic-ai — tool-call + native structured output strategies with retry.
 
 **Corresponds to:** `reference/pydantic-ai/structured-output-internals.md`
 
-### Files to create
+**Implemented:**
+- `src/eddie/structured_output.gleam` — Sans-IO structured output extraction with two strategies:
+  - `OutputSchema(a)`: wraps `sextant.JsonSchema(a)` with name + description
+  - `Strategy`: `ToolCallStrategy` (fake tool whose args are the schema) or `NativeStrategy` (response_format json_schema)
+  - `extract(config, messages, output, strategy, max_retries, send_fn)` — main extraction function with injectable send_fn
+  - `StructuredOutputError`: `SendError`, `ApiError`, `EmptyResponse`, `MaxRetriesExceeded`, `UnexpectedResponse`
+  - Retry loop: validation failure → structured error feedback → re-request → re-validate
+  - `strip_markdown_fences` utility for LLMs that wrap JSON in code fences
+  - `strip_dollar_schema` strips the `$schema` key from sextant output for tool parameters
+- `src/eddie_ffi.erl` — Added `dynamic_to_json/1` FFI for re-encoding Dynamic values to json.Json
+- `test/eddie_test_ffi.erl` — Erlang atomics-based counter for sequencing mock responses in tests
 
-**`src/eddie/structured_output.gleam`**
-- `OutputSchema(a)`: wraps `sextant.JsonSchema(a)` with name + description
-- **Tool-call strategy**: register fake tool → LLM "calls" it → validate args with sextant → return typed value
-- **Native strategy**: send schema as `response_format` → parse text response → validate
-- `extract(config, messages, output, max_retries) -> Result(a, StructuredOutputError)`
-- Retry loop: validation error → structured error feedback → re-request → re-validate
+**Key design decisions made during implementation:**
+- Sans-IO pattern: `extract` takes a `send_fn` callback, same pattern as `agent.gleam` — no HTTP dependency
+- Both strategies share the same `parse_and_validate` → `AttemptResult` → retry pipeline
+- Tool-call retry echoes back the failed tool call + RetryPart to keep conversation well-formed
+- Native retry sends error as UserPart (no tool call to echo)
+- `strip_dollar_schema` uses `encode_dynamic` FFI (same as glopenai's `codec.dynamic_to_json`) to re-serialize dict entries
+- Markdown fence stripping handles `\`\`\`json` and `\`\`\`` patterns (common with some models)
 
-Uses:
-- `sextant.to_json(schema)` to generate JSON Schema for tool parameters
-- `sextant.run(data, schema)` to validate LLM response
-- `glopenai/chat.with_response_format` for native strategy
+**Dependencies added:** `sextant`
 
-### Dependencies to add
-`sextant`
-
-### Tests
-- Define sextant schema, extract structured output via tool-call mock
-- Retry: inject validation error, verify structured feedback sent, verify correction
-- Native strategy: response_format in request, parse text response
-- Edge cases: markdown fences, scalar wrapping
+**Tests cover:**
+- Tool-call strategy: valid extraction, markdown fences, scalar wrapping (single-field object)
+- Native strategy: valid extraction, no text returns UnexpectedResponse
+- Retry loop: validation error then correction (tool-call and native), max retries exceeded with error details
+- Error cases: send error, empty response, tool-call with text-only response, native with tool-call response
+- Existing messages forwarded correctly
 
 ---
 

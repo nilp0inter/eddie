@@ -6,3 +6,5 @@
 4. [Typed ConversationLog bypassing WidgetHandle](./tradeoffs/04-typed-conversation-log-in-context.md) — Context holds conversation log as typed opaque type for protocol access
 5. [Inline HTML + plain JS over Lustre SPA](./tradeoffs/05-inline-html-over-lustre-spa.md) — self-contained HTML page served from server.gleam instead of compiled Gleam-to-JS frontend
 6. [Synchronous turn loop inside the agent actor](./tradeoffs/06-synchronous-turn-in-actor.md) — LLM turn loop blocks the actor mailbox for simplicity over responsiveness
+7. [Dual-strategy structured output](./tradeoffs/07-dual-strategy-structured-output.md) — tool-call and native strategies exposed as caller's choice rather than auto-detected or hardcoded
+8. [Dynamic-to-JSON re-encoding via Erlang FFI](./tradeoffs/08-dynamic-to-json-ffi-roundtrip.md) — string round-trip to transform opaque json.Json values

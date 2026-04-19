@@ -26,4 +26,6 @@
   - [Typed ConversationLog in Context](./decisions/tradeoffs/04-typed-conversation-log-in-context.md)
   - [Inline HTML over Lustre SPA](./decisions/tradeoffs/05-inline-html-over-lustre-spa.md)
   - [Synchronous turn in actor](./decisions/tradeoffs/06-synchronous-turn-in-actor.md)
+  - [Dual-strategy structured output](./decisions/tradeoffs/07-dual-strategy-structured-output.md)
+  - [Dynamic-to-JSON FFI roundtrip](./decisions/tradeoffs/08-dynamic-to-json-ffi-roundtrip.md)
 - [Technical Debt](./decisions/tech-debt.md)
