@@ -38,12 +38,18 @@ The **agent loop** is the core cycle:
 
 ## Widget tree
 
-The agent's context is composed from a tree of widgets. Two are implemented so far:
+The agent's context is composed from a tree of widgets, orchestrated by the **Context compositor**:
 
 - **SystemPrompt** — provides the agent's identity and framing text as a system message
 - **ConversationLog** — manages task-partitioned conversation history, memory management, and the task protocol that governs when non-task tools can be called
 
 Additional widgets (goal, token usage, file explorer) are planned for Phase 6.
+
+## Context compositor and LLM bridge
+
+The **Context** (`eddie/context`) is the root compositor that holds the widget tree, routes tool calls to their owning widgets, and enforces the task protocol before dispatch. It composes messages and tools from all widgets in a fixed order (system prompt → children → conversation log).
+
+The **LLM bridge** (`eddie/llm`) converts between Eddie types and glopenai types in a sans-IO style — it builds HTTP requests and parses responses without performing network IO. The **HTTP layer** (`eddie/http`) is the only module that touches the network.
 
 ## Module map
 

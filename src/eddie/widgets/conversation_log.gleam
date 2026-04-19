@@ -10,6 +10,7 @@
 /// prompts: only the task description and the LLM-authored **memories**
 /// survive. The browser can still expand the span visually, and the LLM
 /// can request one-shot re-expansion via `task_pick(task_id)`.
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
@@ -23,7 +24,9 @@ import gleam/string
 import lustre/element.{type Element}
 import lustre/element/html
 
-import eddie/cmd.{type Cmd, type Initiator, CmdNone, LLM, UI}
+import eddie/cmd.{
+  type Cmd, type Initiator, CmdEffect, CmdNone, CmdToolResult, LLM, UI,
+}
 import eddie/message.{type Message}
 import eddie/tool.{type ToolDefinition}
 import eddie/widget.{type WidgetHandle}
@@ -1132,24 +1135,153 @@ fn from_ui_update_task_status(args: Dynamic) -> Option(ConversationLogMsg) {
 // Factory
 // ============================================================================
 
-/// Create a ConversationLog widget handle.
-pub fn create() -> WidgetHandle {
-  widget.create(widget.WidgetConfig(
+/// Build the WidgetConfig from a model. Shared between create() and to_handle().
+fn widget_config(
+  model: ConversationLogModel,
+) -> widget.WidgetConfig(ConversationLogModel, ConversationLogMsg) {
+  widget.WidgetConfig(
     id: "conversation_log",
-    model: new_model(),
+    model: model,
     update: update,
     view_messages: view_messages,
     view_tools: view_tools,
     view_html: view_html,
     from_llm: from_llm,
     from_ui: from_ui,
-    frontend_tools: set.from_list([
-      "create_task", "start_task", "task_memory", "close_current_task",
-      "task_pick", "remove_task", "edit_memory", "remove_memory",
-      "toggle_task_expanded", "update_task_status",
-    ]),
+    frontend_tools: frontend_tool_names(),
     protocol_free_tools: set.new(),
-  ))
+  )
+}
+
+fn frontend_tool_names() -> Set(String) {
+  set.from_list([
+    "create_task", "start_task", "task_memory", "close_current_task",
+    "task_pick", "remove_task", "edit_memory", "remove_memory",
+    "toggle_task_expanded", "update_task_status",
+  ])
+}
+
+/// Create a ConversationLog widget handle.
+pub fn create() -> WidgetHandle {
+  widget.create(widget_config(new_model()))
+}
+
+// ============================================================================
+// Typed API — used by Context for protocol checking and typed dispatch
+// ============================================================================
+
+/// Typed reference to the conversation log, preserving access to the model
+/// so Context can check protocol and get the owning task id without
+/// breaking type erasure boundaries.
+pub opaque type ConversationLog {
+  ConversationLog(model: ConversationLogModel)
+}
+
+/// Create a new typed conversation log reference.
+pub fn init() -> ConversationLog {
+  ConversationLog(model: new_model())
+}
+
+/// Convert to a type-erased WidgetHandle (for view_html, view_messages, etc.).
+pub fn to_handle(log: ConversationLog) -> WidgetHandle {
+  widget.create(widget_config(log.model))
+}
+
+/// Check if a tool call is allowed under the task protocol.
+/// Returns Some(error_message) if the call violates the protocol,
+/// or None if it's allowed.
+pub fn protocol_check(
+  log log: ConversationLog,
+  tool_name tool_name: String,
+  protocol_free_tools protocol_free_tools: Set(String),
+) -> Option(String) {
+  check_protocol(
+    model: log.model,
+    tool_name: tool_name,
+    protocol_free_tools: protocol_free_tools,
+  )
+}
+
+/// Return the active task id (for tagging log items).
+pub fn owning_task_id(log log: ConversationLog) -> Option(Int) {
+  current_owning_task_id(model: log.model)
+}
+
+/// Dispatch an LLM tool call through the typed log.
+/// Runs from_llm -> update -> Cmd loop.
+pub fn dispatch_tool(
+  log log: ConversationLog,
+  tool_name tool_name: String,
+  args args: Dynamic,
+) -> #(ConversationLog, Result(String, String)) {
+  case from_llm(log.model, tool_name, args) {
+    Error(err) -> #(log, Error(err))
+    Ok(msg) -> {
+      let #(new_model, cmd_result) = update(log.model, msg)
+      execute_log_cmd_loop(model: new_model, cmd: cmd_result)
+    }
+  }
+}
+
+/// Dispatch a browser UI event through the typed log.
+pub fn dispatch_event(
+  log log: ConversationLog,
+  event_name event_name: String,
+  args args: Dynamic,
+) -> #(ConversationLog, Option(String)) {
+  let is_frontend = set.contains(frontend_tool_names(), event_name)
+  use <- bool.guard(when: !is_frontend, return: #(log, None))
+  case from_ui(log.model, event_name, args) {
+    None -> #(log, None)
+    Some(msg) -> {
+      let #(new_model, cmd_result) = update(log.model, msg)
+      let #(new_log, result) =
+        execute_log_cmd_loop(model: new_model, cmd: cmd_result)
+      #(new_log, option.from_result(result))
+    }
+  }
+}
+
+/// Send a typed message directly (bypasses anticorruption layers).
+/// Used for internal messages like UserMessageReceived, ResponseReceived, etc.
+pub fn send_msg(
+  log log: ConversationLog,
+  msg msg: ConversationLogMsg,
+) -> ConversationLog {
+  let #(new_model, _cmd) = update(log.model, msg)
+  ConversationLog(model: new_model)
+}
+
+/// Get the view_messages from the typed log.
+pub fn typed_view_messages(log log: ConversationLog) -> List(Message) {
+  view_messages(log.model)
+}
+
+/// Get the view_tools from the typed log.
+pub fn typed_view_tools(log log: ConversationLog) -> List(ToolDefinition) {
+  view_tools(log.model)
+}
+
+/// Get the view_html from the typed log.
+pub fn typed_view_html(log log: ConversationLog) -> Element(Nil) {
+  view_html(log.model)
+}
+
+/// Execute the Cmd loop for the typed log (mirrors widget.execute_cmd_loop).
+fn execute_log_cmd_loop(
+  model model: ConversationLogModel,
+  cmd cmd: Cmd(ConversationLogMsg),
+) -> #(ConversationLog, Result(String, String)) {
+  case cmd {
+    CmdNone -> #(ConversationLog(model: model), Ok(""))
+    CmdToolResult(text) -> #(ConversationLog(model: model), Ok(text))
+    CmdEffect(perform, to_msg) -> {
+      let data = perform()
+      let msg = to_msg(data)
+      let #(new_model, next_cmd) = update(model, msg)
+      execute_log_cmd_loop(model: new_model, cmd: next_cmd)
+    }
+  }
 }
 
 // ============================================================================

@@ -67,42 +67,29 @@ Reference files:
 
 ---
 
-## Phase 3: Context Compositor and LLM Client
+## Phase 3: Context Compositor and LLM Client ✅
 
-**Goal:** Root compositor + glopenai bridge. The glue between widgets and LLM.
+**Status:** Complete — 93 tests passing (64 Phase 1+2 + 29 Phase 3), glinter clean (expected warnings only).
 
-**Corresponds to:** `calipso/widgets/context.py`, `calipso/model.py`
+**Implemented:**
+- `src/eddie/context.gleam` — Root compositor with opaque `Context` type, `new`, `view_messages`, `view_tools`, `add_user_message`, `add_response`, `add_tool_results`, `consume_picks`, `handle_tool_call` (with protocol enforcement), `handle_widget_event`, `changed_html`, accessors
+- `src/eddie/llm.gleam` — Sans-IO LLM client bridge: `LlmConfig`, `build_request` (glopenai request building), `parse_response` (response parsing into Eddie types), `LlmError` type
+- `src/eddie/http.gleam` — HTTP execution layer: `send` via gleam_httpc, `HttpError` type
+- `src/eddie/widgets/conversation_log.gleam` — Added typed API: `ConversationLog` opaque type, `init`, `to_handle`, `protocol_check`, `owning_task_id`, `dispatch_tool`, `dispatch_event`, `send_msg`, `typed_view_messages`, `typed_view_tools`, `typed_view_html`
 
-### Files to create
+**Key design decisions made during implementation:**
+- Context stores `ConversationLog` (typed) instead of `WidgetHandle` for the conversation log, giving it direct access to protocol checking and owning task id without breaking type erasure
+- `ConversationLog` opaque type added to conversation_log module — wraps the model and provides typed dispatch/send functions, with its own Cmd loop implementation
+- Tool owners map rebuilt after every state mutation to keep it in sync with conditional tool availability
+- Conversation log tools always registered in tool_owners even when conditionally hidden from view_tools
+- `changed_html` uses string comparison of rendered HTML to detect changes
+- `llm.gleam` follows sans-IO pattern: builds glopenai `Request(String)`, parses `Response(String)` — no network IO
 
-**`src/eddie/context.gleam`** — Root compositor
-- `Context(system_prompt, children, conversation_log, tool_owners)`
-- `new(system_prompt, conversation_log, children) -> Context` — builds tool_owners map
-- `view_messages(ctx) -> List(Message)` — composes from all widgets
-- `view_tools(ctx) -> List(ToolDefinition)` — composes from all widgets
-- `add_user_message(ctx, text) -> Context`
-- `handle_tool_call(ctx, tool_name, args, tool_call_id) -> #(Context, Result(String, String))` — dispatches to owner, enforces protocol
-- `handle_widget_event(ctx, event_name, args) -> Context` — UI dispatch, bypasses protocol
-- `changed_html(old_ctx, new_ctx) -> List(#(String, Element(Nil)))` — diff detection
+**Dependencies added:** `gleam_httpc`, `gleam_http`
 
-**`src/eddie/llm.gleam`** — LLM client bridge
-- `LlmConfig(api_base, api_key, model)`
-- `build_request(config, messages, tools) -> Request(String)` — uses glopenai builders
-- `parse_response(Response(String)) -> Result(Message, GlopenaiError)`
-
-**`src/eddie/http.gleam`** — HTTP execution layer
-- `send(Request(String)) -> Result(Response(String), HttpError)` — via gleam_httpc
-
-### Dependencies to add
-`gleam_httpc`, `gleam_http`
-
-### Tests
-- Context composes messages from all widgets in correct order
-- Tool dispatch routes to correct owner
-- Protocol enforcement: rejects tool calls outside active task
-- LLM request building produces valid JSON
-- LLM response parsing extracts text and tool calls
-- Integration: build request from context, mock response, parse it
+**Tests cover:**
+- Context: message composition order (system → children → log), tool composition, tool dispatch routing (to conversation_log, to child widgets, unknown tool error), protocol enforcement (rejects outside task, allows task management, allows protocol-free tools), user message recording, response recording, UI event dispatch, changed_html detection, accessors, full task lifecycle through context
+- LLM: request building (method/path, auth header, model, messages, tools), response parsing (text-only, tool calls, empty choices, API errors)
 
 ---
 

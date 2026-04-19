@@ -23,4 +23,5 @@
   - [Type erasure via closures](./decisions/tradeoffs/01-type-erasure-via-closures.md)
   - [Unsafe coercion for send](./decisions/tradeoffs/02-unsafe-coerce-for-send.md)
   - [Result types instead of panics](./decisions/tradeoffs/03-result-over-panic.md)
+  - [Typed ConversationLog in Context](./decisions/tradeoffs/04-typed-conversation-log-in-context.md)
 - [Technical Debt](./decisions/tech-debt.md)

@@ -34,6 +34,9 @@ src/
     message.gleam      MessagePart, Message types, glopenai conversion
     tool.gleam         ToolDefinition type, glopenai conversion
     widget.gleam       WidgetConfig, WidgetHandle (type-erased), Cmd loop
+    context.gleam      Context compositor, tool dispatch, protocol enforcement
+    llm.gleam          Sans-IO LLM client bridge (glopenai)
+    http.gleam         HTTP execution layer (gleam_httpc)
     coerce.gleam       Unsafe type coercion for type erasure boundary
   eddie_ffi.erl        Erlang FFI (identity function for coercion)
 test/
@@ -42,6 +45,8 @@ test/
     message_test.gleam
     tool_test.gleam
     widget_test.gleam
+    context_test.gleam
+    llm_test.gleam
 reference/             Read-only reference implementations
   calipso/             Python reference (Elm-architecture widgets)
   glopenai/            Gleam OpenAI client (published on hex.pm)

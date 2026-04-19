@@ -73,7 +73,41 @@ Log items are walked in chronological order, grouped by consecutive `owning_task
 
 An "Open tasks" block listing pending and in-progress tasks is appended at the end.
 
-**Factory:** `create()` — returns a `WidgetHandle` with an empty model.
+**Factory:** `create()` — returns a `WidgetHandle` with an empty model. For Context's use, `init()` returns a typed `ConversationLog` opaque type with direct dispatch, protocol checking, and owning task ID access (see [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md)).
+
+## Context and LLM (Phase 3)
+
+### `eddie/context`
+
+The root compositor — the glue between widgets and the agent loop. Holds a system prompt widget, zero or more child widgets, and a typed conversation log. Orchestrates tool dispatch, message composition, and protocol enforcement.
+
+- **`Context`** — opaque type holding the widget tree plus a `tool_owners` map (tool name → widget ID) and a collected `protocol_free_tools` set
+- **`new(system_prompt, children, conversation_log)`** — builds the context and scans all widgets to populate `tool_owners`
+- **`view_messages`** — composes messages from all widgets in order: system prompt → children → conversation log
+- **`view_tools`** — collects tool definitions from all widgets
+- **`add_user_message` / `add_response` / `add_tool_results`** — record items in the conversation log, tagged with the current owning task ID
+- **`consume_picks`** — clears one-shot task expansions after a request/response round-trip
+- **`handle_tool_call(context, tool_name, args, tool_call_id)`** — enforces the task protocol via `conversation_log.protocol_check`, then routes to the owning widget. Returns `#(Context, Result(String, String))`
+- **`handle_widget_event`** — dispatches browser UI events to all widgets (no protocol enforcement)
+- **`changed_html(old, new)`** — detects which widgets' HTML changed between two snapshots
+
+The conversation log is stored as a typed `ConversationLog` (not a `WidgetHandle`) so Context can access protocol checking and the owning task ID directly. See [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md) for the rationale.
+
+### `eddie/llm`
+
+Sans-IO LLM client bridge. Converts between Eddie types and glopenai types without performing any network IO.
+
+- **`LlmConfig(api_base, api_key, model)`** — configuration for the LLM endpoint
+- **`build_request(config, messages, tools)`** — converts Eddie `Message` and `ToolDefinition` lists into a glopenai `CreateChatCompletionRequest`, returns a ready-to-send `Request(String)`
+- **`parse_response(response)`** — parses a glopenai API response into an Eddie `Message`, returns `Result(Message, LlmError)`
+- **`LlmError`** — `ApiError(GlopenaiError)` | `EmptyResponse`
+
+### `eddie/http`
+
+Thin HTTP execution layer — the only module that performs actual network IO.
+
+- **`send(request)`** — sends an `Request(String)` via gleam_httpc, returns `Result(Response(String), HttpError)`
+- **`HttpError`** — wraps `httpc.HttpError`
 
 ## Core types (Phase 1)
 
