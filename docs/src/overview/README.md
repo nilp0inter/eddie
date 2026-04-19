@@ -7,34 +7,40 @@ Eddie is a Gleam reimplementation of Calipso — an Elm-architecture widget syst
 ```mermaid
 %%{init: {'flowchart': {'curve': 'natural'}}}%%
 flowchart TB
-    User((User)) <--> SPA["Lustre SPA"]
-    SPA <--> Server["Mist Server"]
-    Server <--> Agent["Agent Process"]
+    User((User)) <--> Browser["Browser"]
+    Browser <-->|WebSocket| Server["Mist Server"]
+    Server ==>|spawns| TurnProc["Turn Process"]
+    TurnProc --> Agent["Agent Actor"]
+    Server -->|subscribe| Agent
     Agent <--> Context["Context Compositor"]
     Context <--> Widgets["Widget Tree"]
-    Agent <--> LLM["LLM API"]
+    Agent -->|http.send| LLM["LLM API"]
+    Agent -.->|HTML fragments| Server
 ```
 
 The **agent loop** is the core cycle:
 
-1. User sends a message through the browser
-2. The agent composes a prompt from all widgets' `view_messages` and `view_tools`
-3. The LLM responds with text or tool calls
-4. Tool calls are dispatched to the owning widget via the Context compositor
-5. The widget's `update` function produces a new model and a `Cmd`
-6. The loop repeats until the LLM produces a text-only response
+1. User sends a message through the browser over WebSocket
+2. The mist server spawns a helper process that calls `agent.run_turn` (blocking)
+3. The agent adds the user message to the Context, then enters the turn loop
+4. Each iteration: compose messages + tools → build HTTP request → send to LLM → parse response
+5. If the response contains tool calls, dispatch each to its owning widget via the Context compositor
+6. Record tool results in the conversation log, then loop back to step 4
+7. When the LLM responds with text only, the turn completes and the result is sent back over WebSocket
+8. After every state mutation, the agent computes `changed_html` and pushes HTML fragments to all subscribed WebSocket connections
 
 ## Key differences from Calipso
 
 | Aspect | Calipso (Python) | Eddie (Gleam) |
 |---|---|---|
-| Agent model | Mono-agent server | OTP multi-agent with hierarchical spawning |
-| Frontend | htmx SPA (no build step) | Lustre SPA (compiled Gleam to JS) |
-| Widget HTML | Plain HTML strings | Lustre element types (type-safe) |
+| Agent model | Mono-agent asyncio | OTP actor (single-threaded, message-based) |
+| Frontend | htmx SPA (no build step) | Inline HTML + plain JS over WebSocket (no build step) |
+| Widget HTML | Plain HTML strings with htmx OOB swaps | Lustre element types, serialised with `data-swap-oob` for manual DOM swap |
 | LLM client | Pydantic AI | glopenai (sans-IO) + gleam_httpc |
-| Structured output | Pydantic AI built-in | Custom layer using sextant (JSON Schema) |
+| Structured output | Pydantic AI built-in | Custom layer using sextant (Phase 5) |
 | State mutation | Mutable models (in-place) | Immutable models (update returns new value) |
 | Type erasure | Python `Any` + duck typing | Opaque type with closures over typed internals |
+| Update push | `on_update` callback | Subscriber `Subject(String)` pattern |
 
 ## Widget tree
 

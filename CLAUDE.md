@@ -28,8 +28,10 @@ Never format before tests and lint pass. Always scope format to `src/` and `test
 
 ```
 src/
-  eddie.gleam          Entry point
+  eddie.gleam          Entry point (env config, start agent + server)
   eddie/
+    agent.gleam        OTP actor: turn loop, subscriber notifications
+    server.gleam       mist HTTP + WebSocket server, inline HTML frontend
     cmd.gleam          Cmd(msg) side-effect descriptors, Initiator type
     message.gleam      MessagePart, Message types, glopenai conversion
     tool.gleam         ToolDefinition type, glopenai conversion
@@ -38,7 +40,7 @@ src/
     llm.gleam          Sans-IO LLM client bridge (glopenai)
     http.gleam         HTTP execution layer (gleam_httpc)
     coerce.gleam       Unsafe type coercion for type erasure boundary
-  eddie_ffi.erl        Erlang FFI (identity function for coercion)
+  eddie_ffi.erl        Erlang FFI (identity, get_env)
 test/
   eddie/
     cmd_test.gleam
@@ -47,6 +49,7 @@ test/
     widget_test.gleam
     context_test.gleam
     llm_test.gleam
+    agent_test.gleam
 reference/             Read-only reference implementations
   calipso/             Python reference (Elm-architecture widgets)
   glopenai/            Gleam OpenAI client (published on hex.pm)

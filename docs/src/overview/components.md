@@ -1,5 +1,85 @@
 # Components
 
+## Agent and Server (Phase 4)
+
+### `eddie/agent`
+
+OTP actor that owns the agent state and runs the LLM turn loop. The actor processes one message at a time — the turn loop runs synchronously within the actor process, which is idiomatic for the BEAM (lightweight processes, no thread contention).
+
+- **`AgentConfig(llm_config, system_prompt)`** — configuration passed at start
+- **`AgentMessage`** — opaque message type with five variants:
+  - `RunTurn(text, reply_to)` — user message triggers a full turn loop
+  - `GetState(reply_to)` — return current Context for inspection
+  - `Subscribe(subscriber)` / `Unsubscribe(subscriber)` — register/unregister for HTML update notifications
+  - `DispatchEvent(event_name, args_json)` — forward browser widget events
+- **`TurnResult`** — `TurnSuccess(text)` | `TurnError(reason)`
+- **`start(config)`** — creates a Context with default widgets, starts the actor, returns `Result(Subject(AgentMessage), StartError)`
+- **`start_with_send_fn(config, send_fn)`** — same but with an injectable HTTP sender for testing
+- **`run_turn(subject, text, timeout)`** — convenience wrapper around `process.call`
+
+**Turn loop internals:**
+
+The recursive turn loop (`turn_loop → do_turn_step → handle_llm_response → dispatch_tool_calls → turn_loop`) is capped at 25 iterations. Each iteration:
+
+1. Compose messages and tools from the Context
+2. Build an HTTP request via `llm.build_request` and send via the injectable `send_fn`
+3. Parse the response; consume picks; record the response in the conversation log
+4. If tool calls: dispatch each through `context.handle_tool_call`, collect `ToolReturnPart`s, record tool results, continue loop
+5. If text only: extract text and return `TurnSuccess`
+
+**Subscriber notification:**
+
+After each state mutation (user message added, response recorded, tool calls dispatched, tool results recorded), the agent computes `context.changed_html(old, new)` and wraps each changed widget's HTML in a `<div id="widget-{id}" data-swap-oob="true">` envelope. The concatenated HTML string is sent to all subscriber Subjects. This is a fire-and-forget push — subscribers are WebSocket handler processes that forward the HTML to the browser.
+
+### `eddie/server`
+
+Mist HTTP and WebSocket server. Thin glue between the browser and the agent actor.
+
+- **`ServerConfig(port)`** — listening port configuration
+- **`start(config, agent)`** — starts mist, returns `Result(Started(Supervisor), StartError)`
+
+**Routes:**
+
+| Method | Path | Behaviour |
+|---|---|---|
+| `GET` | `/` | Serves the inline HTML frontend |
+| `GET` | `/ws` | WebSocket upgrade |
+| `*` | `*` | 404 |
+
+**WebSocket protocol:**
+
+Each WebSocket connection is a separate BEAM process. On init, it creates two Subjects — one for HTML updates (`Subject(String)`), one for turn results (`Subject(TurnResult)`) — and builds a Selector that maps both to internal `WsCustomMessage` variants. The connection subscribes to the agent for HTML updates.
+
+*Client → Server messages (JSON over WebSocket):*
+
+| Key | Payload | Effect |
+|---|---|---|
+| `user_input` | `{"user_input": "text"}` | Spawns a helper process that calls `agent.run_turn` and sends the result to the turn result Subject |
+| `widget_event` | `{"widget_event": {"event_name": "...", "args_json": "..."}}` | Forwards to `agent.dispatch_event` |
+
+*Server → Client messages:*
+
+| Type | Payload | Purpose |
+|---|---|---|
+| HTML fragments | Raw HTML with `data-swap-oob` divs | Widget state changes (pushed by agent subscriber) |
+| `turn_start` | `{"type": "turn_start"}` | Enables thinking indicator in the browser |
+| `turn_end` | `{"type": "turn_end", "success": bool, "text": "...", "error": "..."}` | Disables thinking indicator, displays response |
+
+**Inline HTML frontend:**
+
+The `index_html()` function returns a self-contained HTML page with embedded CSS and ~40 lines of JavaScript. Features: Catppuccin-themed chat interface, sidebar widget panels, WebSocket with auto-reconnect, manual DOM swap for OOB-tagged fragments, thinking indicator during turns. No build step, no external dependencies. This approach matches Calipso's htmx pattern but without the htmx library — just plain `element.innerHTML` replacement keyed by element ID.
+
+### `eddie` (entry point)
+
+Application entry point. Reads configuration from environment variables, creates the agent and server, then sleeps forever (the BEAM scheduler keeps the actor and server alive).
+
+| Env var | Required | Default | Purpose |
+|---|---|---|---|
+| `OPENROUTER_API_KEY` | Yes | — | LLM API key |
+| `OPENROUTER_API_BASE` | No | `https://openrouter.ai/api/v1` | LLM API base URL |
+| `EDDIE_MODEL` | No | `anthropic/claude-sonnet-4` | Model identifier |
+| `EDDIE_PORT` | No | `8080` | HTTP listening port |
+
 ## Widgets (Phase 2)
 
 ### `eddie/widgets/system_prompt`
