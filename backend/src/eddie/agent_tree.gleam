@@ -1,83 +1,111 @@
-/// Agent tree — manages hierarchical parent-child agent relationships.
+/// Agent tree — manages a forest of rose-tree agent hierarchies.
 ///
 /// Each agent in the tree is an independent OTP actor with its own context.
 /// Children inherit the parent's LlmConfig (with optional overrides) and
 /// run their own turn loops independently.
 ///
-/// The tree itself is an OTP actor so children can be spawned at runtime
+/// The tree starts empty — no agents exist until explicitly spawned.
+/// Root agents are created by the user via the UI. Child agents are
+/// spawned by parent agents via tools.
+///
+/// The tree itself is an OTP actor so agents can be spawned at runtime
 /// and looked up by the server without holding a stale reference.
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option
-import gleam/result
+import gleam/option.{type Option, None, Some}
 
 import eddie/agent.{
-  type AgentConfig, type AgentConfigOverride, type AgentMessage,
+  type AgentConfig, type AgentConfigOverride, type AgentMessage, AgentConfig,
 }
 import eddie/http as eddie_http
 
-import eddie_shared/agent_info.{type AgentInfo, AgentInfo}
+import eddie_shared/agent_info.{
+  type AgentInfo, type AgentStatus, type AgentTreeNode, AgentInfo, AgentTreeNode,
+}
+import eddie_shared/protocol
 
 import gleam/erlang/process.{type Subject}
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/otp/actor
 
-/// Errors that can occur when spawning a child agent.
+/// Errors that can occur when spawning an agent.
 pub type SpawnError {
-  /// A child with this ID already exists
-  ChildAlreadyExists(id: String)
-  /// The agent actor failed to start
-  ChildStartFailed(actor.StartError)
+  /// An agent with this ID already exists.
+  AgentAlreadyExists(id: String)
+  /// The specified parent does not exist.
+  ParentNotFound(id: String)
+  /// The agent actor failed to start.
+  AgentStartFailed(actor.StartError)
+}
+
+/// An entry in the flat agent registry.
+type AgentEntry {
+  AgentEntry(
+    subject: Subject(AgentMessage),
+    label: String,
+    parent_id: Option(String),
+    child_ids: List(String),
+    status: AgentStatus,
+  )
 }
 
 /// Messages handled by the agent tree actor.
 pub opaque type AgentTreeMessage {
-  GetRoot(reply_to: Subject(Subject(AgentMessage)))
   GetAgent(id: String, reply_to: Subject(Result(Subject(AgentMessage), Nil)))
-  ListAgents(reply_to: Subject(List(AgentInfo)))
-  SpawnChild(
+  GetAgentTree(reply_to: Subject(List(AgentTreeNode)))
+  GetChildren(parent_id: String, reply_to: Subject(List(AgentInfo)))
+  GetParent(child_id: String, reply_to: Subject(Option(String)))
+  SpawnRootAgent(
     id: String,
     label: String,
+    system_prompt: String,
+    reply_to: Subject(Result(Nil, SpawnError)),
+  )
+  SpawnChildAgent(
+    id: String,
+    label: String,
+    parent_id: String,
+    goal: String,
+    initial_message: String,
     override: AgentConfigOverride,
     reply_to: Subject(Result(Nil, SpawnError)),
   )
+  UpdateStatus(agent_id: String, status: AgentStatus)
+  SubscribeTree(subscriber: Subject(String))
+  UnsubscribeTree(subscriber: Subject(String))
 }
 
 /// Internal actor state.
 type TreeState {
   TreeState(
-    root: Subject(AgentMessage),
-    root_config: AgentConfig,
-    children: Dict(String, #(Subject(AgentMessage), String)),
+    agents: Dict(String, AgentEntry),
+    base_config: AgentConfig,
     send_fn: fn(Request(String)) ->
       Result(Response(String), eddie_http.HttpError),
+    subscribers: List(Subject(String)),
   )
 }
 
-/// Start a new agent tree with a root agent.
+/// Start a new empty agent tree.
 pub fn start(
   config config: AgentConfig,
 ) -> Result(Subject(AgentTreeMessage), actor.StartError) {
   start_with_send_fn(config: config, send_fn: eddie_http.send)
 }
 
-/// Start a new agent tree with an injectable HTTP send function (for testing).
+/// Start an empty agent tree with an injectable HTTP send function (for testing).
 pub fn start_with_send_fn(
   config config: AgentConfig,
   send_fn send_fn: fn(Request(String)) ->
     Result(Response(String), eddie_http.HttpError),
 ) -> Result(Subject(AgentTreeMessage), actor.StartError) {
-  use root <- result.try(agent.start_with_send_fn(
-    config: config,
-    send_fn: send_fn,
-  ))
   let initial_state =
     TreeState(
-      root: root,
-      root_config: config,
-      children: dict.new(),
+      agents: dict.new(),
+      base_config: config,
       send_fn: send_fn,
+      subscribers: [],
     )
   let result =
     actor.new(initial_state)
@@ -94,77 +122,225 @@ fn handle_message(
   msg: AgentTreeMessage,
 ) -> actor.Next(TreeState, AgentTreeMessage) {
   case msg {
-    GetRoot(reply_to) -> {
-      process.send(reply_to, state.root)
-      actor.continue(state)
-    }
-
     GetAgent(id, reply_to) -> {
-      let result = case id {
-        "root" -> Ok(state.root)
-        _ ->
-          dict.get(state.children, id)
-          |> result.map(fn(pair) { pair.0 })
+      let result = case dict.get(state.agents, id) {
+        Ok(entry) -> Ok(entry.subject)
+        Error(_) -> Error(Nil)
       }
       process.send(reply_to, result)
       actor.continue(state)
     }
 
-    ListAgents(reply_to) -> {
-      let root_info =
-        AgentInfo(
-          id: "root",
-          label: "Root",
-          parent_id: option.None,
-          status: agent_info.AgentIdle,
-        )
-      let child_infos =
-        dict.to_list(state.children)
-        |> list.map(fn(entry) {
-          let #(id, #(_, label)) = entry
-          AgentInfo(
-            id: id,
-            label: label,
-            parent_id: option.Some("root"),
-            status: agent_info.AgentIdle,
-          )
-        })
-      process.send(reply_to, [root_info, ..child_infos])
+    GetAgentTree(reply_to) -> {
+      process.send(reply_to, build_tree(state.agents))
       actor.continue(state)
     }
 
-    SpawnChild(id, label, override, reply_to) -> {
-      case dict.has_key(state.children, id) {
+    GetChildren(parent_id, reply_to) -> {
+      let children = case dict.get(state.agents, parent_id) {
+        Ok(entry) ->
+          list.filter_map(entry.child_ids, fn(cid) {
+            case dict.get(state.agents, cid) {
+              Ok(child) ->
+                Ok(AgentInfo(
+                  id: cid,
+                  label: child.label,
+                  parent_id: Some(parent_id),
+                  status: child.status,
+                ))
+              Error(_) -> Error(Nil)
+            }
+          })
+        Error(_) -> []
+      }
+      process.send(reply_to, children)
+      actor.continue(state)
+    }
+
+    GetParent(child_id, reply_to) -> {
+      let parent = case dict.get(state.agents, child_id) {
+        Ok(entry) -> entry.parent_id
+        Error(_) -> None
+      }
+      process.send(reply_to, parent)
+      actor.continue(state)
+    }
+
+    SpawnRootAgent(id, label, system_prompt, reply_to) -> {
+      case dict.has_key(state.agents, id) {
         True -> {
-          process.send(reply_to, Error(ChildAlreadyExists(id: id)))
+          process.send(reply_to, Error(AgentAlreadyExists(id: id)))
           actor.continue(state)
         }
         False -> {
-          let child_config =
-            agent.merge_config(
-              parent: state.root_config,
-              child_id: id,
-              override: override,
+          let config =
+            AgentConfig(
+              ..state.base_config,
+              agent_id: id,
+              system_prompt: system_prompt,
             )
-          case
-            agent.start_with_send_fn(
-              config: child_config,
-              send_fn: state.send_fn,
-            )
-          {
+          case agent.start_with_send_fn(config: config, send_fn: state.send_fn) {
             Error(err) -> {
-              process.send(reply_to, Error(ChildStartFailed(err)))
+              process.send(reply_to, Error(AgentStartFailed(err)))
               actor.continue(state)
             }
-            Ok(child_subject) -> {
-              let new_children =
-                dict.insert(state.children, id, #(child_subject, label))
+            Ok(subject) -> {
+              let entry =
+                AgentEntry(
+                  subject: subject,
+                  label: label,
+                  parent_id: None,
+                  child_ids: [],
+                  status: agent_info.AgentIdle,
+                )
+              let new_agents = dict.insert(state.agents, id, entry)
+              let new_state = TreeState(..state, agents: new_agents)
               process.send(reply_to, Ok(Nil))
-              actor.continue(TreeState(..state, children: new_children))
+              broadcast_tree_changed(new_state)
+              actor.continue(new_state)
             }
           }
         }
       }
+    }
+
+    SpawnChildAgent(id, label, parent_id, _goal, initial_message, override, reply_to) -> {
+      case dict.has_key(state.agents, id) {
+        True -> {
+          process.send(reply_to, Error(AgentAlreadyExists(id: id)))
+          actor.continue(state)
+        }
+        False -> {
+          case dict.get(state.agents, parent_id) {
+            Error(_) -> {
+              process.send(reply_to, Error(ParentNotFound(id: parent_id)))
+              actor.continue(state)
+            }
+            Ok(parent_entry) -> {
+              let child_config =
+                agent.merge_config(
+                  parent: state.base_config,
+                  child_id: id,
+                  override: override,
+                )
+              case
+                agent.start_with_send_fn(
+                  config: child_config,
+                  send_fn: state.send_fn,
+                )
+              {
+                Error(err) -> {
+                  process.send(reply_to, Error(AgentStartFailed(err)))
+                  actor.continue(state)
+                }
+                Ok(child_subject) -> {
+                  let child_entry =
+                    AgentEntry(
+                      subject: child_subject,
+                      label: label,
+                      parent_id: Some(parent_id),
+                      child_ids: [],
+                      status: agent_info.AgentIdle,
+                    )
+                  let updated_parent =
+                    AgentEntry(
+                      ..parent_entry,
+                      child_ids: list.append(parent_entry.child_ids, [id]),
+                    )
+                  let new_agents =
+                    state.agents
+                    |> dict.insert(id, child_entry)
+                    |> dict.insert(parent_id, updated_parent)
+                  let new_state = TreeState(..state, agents: new_agents)
+                  process.send(reply_to, Ok(Nil))
+                  // Send the initial message to start the child's turn
+                  agent.send_message(subject: child_subject, text: initial_message)
+                  broadcast_tree_changed(new_state)
+                  actor.continue(new_state)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    UpdateStatus(agent_id, status) -> {
+      case dict.get(state.agents, agent_id) {
+        Error(_) -> actor.continue(state)
+        Ok(entry) -> {
+          let updated = AgentEntry(..entry, status: status)
+          let new_agents = dict.insert(state.agents, agent_id, updated)
+          let new_state = TreeState(..state, agents: new_agents)
+          broadcast_tree_changed(new_state)
+          actor.continue(new_state)
+        }
+      }
+    }
+
+    SubscribeTree(subscriber) -> {
+      actor.continue(
+        TreeState(..state, subscribers: [subscriber, ..state.subscribers]),
+      )
+    }
+
+    UnsubscribeTree(subscriber) -> {
+      actor.continue(
+        TreeState(
+          ..state,
+          subscribers: list.filter(state.subscribers, fn(s) { s != subscriber }),
+        ),
+      )
+    }
+  }
+}
+
+// ============================================================================
+// Tree building — assemble rose-tree from flat Dict
+// ============================================================================
+
+/// Build the rose-tree forest from the flat agent registry.
+/// Returns only root nodes (agents with no parent), with children nested.
+fn build_tree(agents: Dict(String, AgentEntry)) -> List(AgentTreeNode) {
+  dict.to_list(agents)
+  |> list.filter(fn(pair) { { pair.1 }.parent_id == None })
+  |> list.map(fn(pair) { build_node(pair.0, pair.1, agents) })
+}
+
+fn build_node(
+  id: String,
+  entry: AgentEntry,
+  agents: Dict(String, AgentEntry),
+) -> AgentTreeNode {
+  let info =
+    AgentInfo(
+      id: id,
+      label: entry.label,
+      parent_id: entry.parent_id,
+      status: entry.status,
+    )
+  let children =
+    list.filter_map(entry.child_ids, fn(cid) {
+      case dict.get(agents, cid) {
+        Ok(child_entry) -> Ok(build_node(cid, child_entry, agents))
+        Error(_) -> Error(Nil)
+      }
+    })
+  AgentTreeNode(info: info, children: children)
+}
+
+// ============================================================================
+// Subscriber notification
+// ============================================================================
+
+fn broadcast_tree_changed(state: TreeState) -> Nil {
+  case state.subscribers {
+    [] -> Nil
+    _ -> {
+      let tree = build_tree(state.agents)
+      let event = protocol.AgentTreeChanged(roots: tree)
+      let payload = protocol.server_events_to_json_string([event])
+      list.each(state.subscribers, fn(sub) { process.send(sub, payload) })
     }
   }
 }
@@ -173,12 +349,7 @@ fn handle_message(
 // Public API — callers interact via typed functions, never raw messages
 // ============================================================================
 
-/// Get the root agent's subject.
-pub fn root(tree tree: Subject(AgentTreeMessage)) -> Subject(AgentMessage) {
-  process.call(tree, waiting: 5000, sending: fn(reply_to) { GetRoot(reply_to:) })
-}
-
-/// Look up an agent by ID. "root" returns the root agent.
+/// Look up an agent by ID.
 pub fn get_agent(
   tree tree: Subject(AgentTreeMessage),
   id id: String,
@@ -188,21 +359,83 @@ pub fn get_agent(
   })
 }
 
-/// List all available agents (root + children).
-pub fn list_agents(tree tree: Subject(AgentTreeMessage)) -> List(AgentInfo) {
+/// Get the full rose-tree forest of all agents.
+pub fn get_tree(
+  tree tree: Subject(AgentTreeMessage),
+) -> List(AgentTreeNode) {
   process.call(tree, waiting: 5000, sending: fn(reply_to) {
-    ListAgents(reply_to:)
+    GetAgentTree(reply_to:)
   })
 }
 
-/// Spawn a child agent with the given ID, label, and config override.
+/// Get the children of a specific agent.
+pub fn get_children(
+  tree tree: Subject(AgentTreeMessage),
+  parent_id parent_id: String,
+) -> List(AgentInfo) {
+  process.call(tree, waiting: 5000, sending: fn(reply_to) {
+    GetChildren(parent_id:, reply_to:)
+  })
+}
+
+/// Get the parent ID of a specific agent.
+pub fn get_parent(
+  tree tree: Subject(AgentTreeMessage),
+  child_id child_id: String,
+) -> Option(String) {
+  process.call(tree, waiting: 5000, sending: fn(reply_to) {
+    GetParent(child_id:, reply_to:)
+  })
+}
+
+/// Spawn a new root agent (top-level, no parent).
+pub fn spawn_root(
+  tree tree: Subject(AgentTreeMessage),
+  id id: String,
+  label label: String,
+  system_prompt system_prompt: String,
+) -> Result(Nil, SpawnError) {
+  process.call(tree, waiting: 10_000, sending: fn(reply_to) {
+    SpawnRootAgent(id:, label:, system_prompt:, reply_to:)
+  })
+}
+
+/// Spawn a child agent under a parent.
 pub fn spawn_child(
   tree tree: Subject(AgentTreeMessage),
   id id: String,
   label label: String,
+  parent_id parent_id: String,
+  goal goal: String,
+  initial_message initial_message: String,
   override override: AgentConfigOverride,
 ) -> Result(Nil, SpawnError) {
   process.call(tree, waiting: 10_000, sending: fn(reply_to) {
-    SpawnChild(id:, label:, override:, reply_to:)
+    SpawnChildAgent(id:, label:, parent_id:, goal:, initial_message:, override:, reply_to:)
   })
+}
+
+/// Update an agent's status.
+pub fn update_status(
+  tree tree: Subject(AgentTreeMessage),
+  agent_id agent_id: String,
+  status status: AgentStatus,
+) -> Nil {
+  process.send(tree, UpdateStatus(agent_id:, status:))
+}
+
+/// Subscribe to tree change events (for control WebSocket).
+pub fn subscribe_tree(
+  tree tree: Subject(AgentTreeMessage),
+  subscriber subscriber: Subject(String),
+) -> Nil {
+  process.send(tree, SubscribeTree(subscriber:))
+}
+
+/// Unsubscribe from tree change events.
+pub fn unsubscribe_tree(
+  tree tree: Subject(AgentTreeMessage),
+  subscriber subscriber: Subject(String),
+) -> Nil {
+  process.send(tree, UnsubscribeTree(subscriber:))
 }

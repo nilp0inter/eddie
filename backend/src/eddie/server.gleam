@@ -5,6 +5,7 @@
 /// by path: /ws/<agent_id>) for state updates.
 import eddie/agent.{type AgentMessage}
 import eddie/agent_tree.{type AgentTreeMessage}
+import eddie_shared/agent_info
 import eddie_shared/protocol
 import gleam/bytes_tree
 import gleam/erlang/process.{type Subject}
@@ -12,7 +13,7 @@ import gleam/http/request
 import gleam/http/response
 import gleam/json
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option, Some}
 import gleam/otp/actor
 import gleam/otp/static_supervisor.{type Supervisor}
 import mist
@@ -120,8 +121,6 @@ fn handle_request(
     ["app.js"] -> serve_app_js()
     ["agents"] -> serve_agents(tree)
     ["ws", agent_id] -> upgrade_websocket(req, tree, registry, agent_id)
-    // Backwards compatibility: /ws with no agent_id defaults to root
-    ["ws"] -> upgrade_websocket(req, tree, registry, "root")
     _ -> not_found()
   }
 }
@@ -149,8 +148,9 @@ fn serve_app_js() -> response.Response(mist.ResponseData) {
 fn serve_agents(
   tree: Subject(AgentTreeMessage),
 ) -> response.Response(mist.ResponseData) {
-  let agents = agent_tree.list_agents(tree: tree)
-  let body = json.to_string(json.array(agents, protocol.agent_info_to_json))
+  let roots = agent_tree.get_tree(tree: tree)
+  let body =
+    json.to_string(json.array(roots, agent_info.agent_tree_node_to_json))
   response.new(200)
   |> response.set_header("content-type", "application/json")
   |> response.set_body(mist.Bytes(bytes_tree.from_string(body)))
@@ -368,51 +368,6 @@ fn handle_client_message(state state: WsState, text text: String) -> Nil {
       dispatch_client_command(state, command)
     }
     Error(_) -> Nil
-  }
-}
-
-fn handle_spawn_agent(
-  state: WsState,
-  id: String,
-  label: String,
-  system_prompt: String,
-) -> Nil {
-  let override =
-    agent.AgentConfigOverride(
-      model: None,
-      api_base: None,
-      system_prompt: Some(system_prompt),
-    )
-  case
-    agent_tree.spawn_child(
-      tree: state.tree,
-      id: id,
-      label: label,
-      override: override,
-    )
-  {
-    Ok(_) -> {
-      // Broadcast updated agent list to all connected clients
-      let agents = agent_tree.list_agents(tree: state.tree)
-      let event = protocol.AgentTreeChanged(roots: [])
-      let payload = protocol.server_events_to_json_string([event])
-      registry_broadcast(state.registry, payload)
-    }
-    Error(agent_tree.ChildAlreadyExists(..)) -> {
-      // Send error only to the requesting client
-      let event =
-        protocol.AgentSpawnFailed(id: id, reason: "Agent already exists")
-      let payload = protocol.server_events_to_json_string([event])
-      process.send(state.update_subject, payload)
-      Nil
-    }
-    Error(agent_tree.ChildStartFailed(..)) -> {
-      let event =
-        protocol.AgentSpawnFailed(id: id, reason: "Failed to start agent")
-      let payload = protocol.server_events_to_json_string([event])
-      process.send(state.update_subject, payload)
-      Nil
-    }
   }
 }
 

@@ -24,9 +24,11 @@ pub fn main() -> Nil {
     |> result.try(int.parse)
     |> result.unwrap(8080)
 
-  let config =
+  // Base config — used as a template for all spawned agents.
+  // No agent exists at startup; roots are created by the user.
+  let base_config =
     agent.AgentConfig(
-      agent_id: "root",
+      agent_id: "",
       llm_config: llm.LlmConfig(
         api_base: api_base,
         api_key: api_key,
@@ -35,7 +37,7 @@ pub fn main() -> Nil {
       system_prompt: default_system_prompt(),
     )
 
-  let assert Ok(tree) = agent_tree.start(config: config)
+  let assert Ok(tree) = agent_tree.start(config: base_config)
 
   let server_config = server.ServerConfig(port: port)
   let assert Ok(_) = server.start(config: server_config, tree: tree)

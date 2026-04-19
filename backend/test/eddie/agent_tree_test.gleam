@@ -8,6 +8,7 @@ import eddie/agent
 import eddie/agent_tree
 import eddie/http as eddie_http
 import eddie/llm
+import eddie_shared/agent_info
 
 // ============================================================================
 // Helpers
@@ -15,7 +16,7 @@ import eddie/llm
 
 fn test_config() -> agent.AgentConfig {
   agent.AgentConfig(
-    agent_id: "root",
+    agent_id: "",
     llm_config: llm.LlmConfig(
       api_base: "https://test.example.com/v1",
       api_key: "test-key",
@@ -39,117 +40,22 @@ fn mock_send_fn() -> fn(Request(String)) ->
 }
 
 // ============================================================================
-// Tests: Start tree
+// Tests: Empty tree
 // ============================================================================
 
-pub fn start_tree_test() {
-  let result =
-    agent_tree.start_with_send_fn(
-      config: test_config(),
-      send_fn: mock_send_fn(),
-    )
-  result
-  |> should.be_ok
-}
-
-pub fn root_returns_subject_test() {
+pub fn start_empty_tree_test() {
   let assert Ok(tree) =
     agent_tree.start_with_send_fn(
       config: test_config(),
       send_fn: mock_send_fn(),
     )
-  // Root subject should be usable
-  let result =
-    agent.run_turn(
-      subject: agent_tree.root(tree: tree),
-      text: "Hello",
-      timeout: 10_000,
-    )
-  case result {
-    agent.TurnSuccess(text) -> text |> should.equal("OK")
-    agent.TurnError(reason) -> {
-      should.fail()
-      panic as reason
-    }
-  }
+  // Tree starts empty
+  let roots = agent_tree.get_tree(tree: tree)
+  list.length(roots)
+  |> should.equal(0)
 }
 
-// ============================================================================
-// Tests: Spawn child
-// ============================================================================
-
-pub fn spawn_child_test() {
-  let assert Ok(tree) =
-    agent_tree.start_with_send_fn(
-      config: test_config(),
-      send_fn: mock_send_fn(),
-    )
-
-  let override =
-    agent.AgentConfigOverride(
-      model: Some("child-model"),
-      api_base: None,
-      system_prompt: Some("You are a child assistant."),
-    )
-
-  agent_tree.spawn_child(
-    tree: tree,
-    id: "child-1",
-    label: "Child 1",
-    override: override,
-  )
-  |> should.be_ok
-
-  // Child should be accessible
-  agent_tree.get_agent(tree: tree, id: "child-1")
-  |> should.be_ok
-
-  // Child should be usable
-  let assert Ok(child) = agent_tree.get_agent(tree: tree, id: "child-1")
-  let result =
-    agent.run_turn(subject: child, text: "Hello child", timeout: 10_000)
-  case result {
-    agent.TurnSuccess(text) -> text |> should.equal("OK")
-    agent.TurnError(reason) -> {
-      should.fail()
-      panic as reason
-    }
-  }
-}
-
-pub fn spawn_duplicate_child_fails_test() {
-  let assert Ok(tree) =
-    agent_tree.start_with_send_fn(
-      config: test_config(),
-      send_fn: mock_send_fn(),
-    )
-
-  let override =
-    agent.AgentConfigOverride(model: None, api_base: None, system_prompt: None)
-
-  agent_tree.spawn_child(
-    tree: tree,
-    id: "child-1",
-    label: "Child 1",
-    override: override,
-  )
-  |> should.be_ok
-
-  // Spawning same ID again should fail
-  let result =
-    agent_tree.spawn_child(
-      tree: tree,
-      id: "child-1",
-      label: "Child 1",
-      override: override,
-    )
-  case result {
-    Error(agent_tree.ChildAlreadyExists(id)) -> id |> should.equal("child-1")
-    _ -> should.fail()
-  }
-}
-
-pub fn get_nonexistent_child_fails_test() {
+pub fn get_nonexistent_agent_fails_test() {
   let assert Ok(tree) =
     agent_tree.start_with_send_fn(
       config: test_config(),
@@ -160,19 +66,195 @@ pub fn get_nonexistent_child_fails_test() {
   |> should.be_error
 }
 
-pub fn get_root_by_id_test() {
+// ============================================================================
+// Tests: Spawn root agent
+// ============================================================================
+
+pub fn spawn_root_agent_test() {
   let assert Ok(tree) =
     agent_tree.start_with_send_fn(
       config: test_config(),
       send_fn: mock_send_fn(),
     )
 
-  // "root" should return the root agent
-  agent_tree.get_agent(tree: tree, id: "root")
+  agent_tree.spawn_root(
+    tree: tree,
+    id: "root-1",
+    label: "Root 1",
+    system_prompt: "You are root 1.",
+  )
   |> should.be_ok
+
+  // Agent should be accessible
+  agent_tree.get_agent(tree: tree, id: "root-1")
+  |> should.be_ok
+
+  // Tree should have one root
+  let roots = agent_tree.get_tree(tree: tree)
+  list.length(roots)
+  |> should.equal(1)
+
+  let assert Ok(first) = list.first(roots)
+  first.info.id
+  |> should.equal("root-1")
+  first.info.label
+  |> should.equal("Root 1")
+  first.info.parent_id
+  |> should.equal(None)
 }
 
-pub fn list_agents_test() {
+pub fn spawn_root_agent_usable_test() {
+  let assert Ok(tree) =
+    agent_tree.start_with_send_fn(
+      config: test_config(),
+      send_fn: mock_send_fn(),
+    )
+
+  let assert Ok(_) =
+    agent_tree.spawn_root(
+      tree: tree,
+      id: "root-1",
+      label: "Root 1",
+      system_prompt: "You are root 1.",
+    )
+
+  let assert Ok(subject) = agent_tree.get_agent(tree: tree, id: "root-1")
+  let result = agent.run_turn(subject: subject, text: "Hello", timeout: 10_000)
+  case result {
+    agent.TurnSuccess(text) -> text |> should.equal("OK")
+    agent.TurnError(reason) -> {
+      should.fail()
+      panic as reason
+    }
+  }
+}
+
+pub fn spawn_duplicate_root_fails_test() {
+  let assert Ok(tree) =
+    agent_tree.start_with_send_fn(
+      config: test_config(),
+      send_fn: mock_send_fn(),
+    )
+
+  let assert Ok(_) =
+    agent_tree.spawn_root(
+      tree: tree,
+      id: "root-1",
+      label: "Root 1",
+      system_prompt: "test",
+    )
+
+  let result =
+    agent_tree.spawn_root(
+      tree: tree,
+      id: "root-1",
+      label: "Root 1 Again",
+      system_prompt: "test",
+    )
+  case result {
+    Error(agent_tree.AgentAlreadyExists(id)) -> id |> should.equal("root-1")
+    _ -> should.fail()
+  }
+}
+
+pub fn multiple_roots_test() {
+  let assert Ok(tree) =
+    agent_tree.start_with_send_fn(
+      config: test_config(),
+      send_fn: mock_send_fn(),
+    )
+
+  let assert Ok(_) =
+    agent_tree.spawn_root(tree: tree, id: "r1", label: "R1", system_prompt: "a")
+  let assert Ok(_) =
+    agent_tree.spawn_root(tree: tree, id: "r2", label: "R2", system_prompt: "b")
+
+  let roots = agent_tree.get_tree(tree: tree)
+  list.length(roots)
+  |> should.equal(2)
+}
+
+// ============================================================================
+// Tests: Spawn child agent
+// ============================================================================
+
+pub fn spawn_child_agent_test() {
+  let assert Ok(tree) =
+    agent_tree.start_with_send_fn(
+      config: test_config(),
+      send_fn: mock_send_fn(),
+    )
+
+  let assert Ok(_) =
+    agent_tree.spawn_root(
+      tree: tree,
+      id: "root-1",
+      label: "Root",
+      system_prompt: "test",
+    )
+
+  let override =
+    agent.AgentConfigOverride(
+      model: Some("child-model"),
+      api_base: None,
+      system_prompt: Some("You are a child."),
+    )
+
+  agent_tree.spawn_child(
+    tree: tree,
+    id: "child-1",
+    label: "Child 1",
+    parent_id: "root-1",
+    goal: "Investigate something",
+    initial_message: "Please investigate X",
+    override: override,
+  )
+  |> should.be_ok
+
+  // Child should be accessible
+  agent_tree.get_agent(tree: tree, id: "child-1")
+  |> should.be_ok
+
+  // Tree should show child under root
+  let roots = agent_tree.get_tree(tree: tree)
+  let assert Ok(root_node) = list.first(roots)
+  list.length(root_node.children)
+  |> should.equal(1)
+
+  let assert Ok(child_node) = list.first(root_node.children)
+  child_node.info.id
+  |> should.equal("child-1")
+  child_node.info.parent_id
+  |> should.equal(Some("root-1"))
+}
+
+pub fn spawn_child_nonexistent_parent_fails_test() {
+  let assert Ok(tree) =
+    agent_tree.start_with_send_fn(
+      config: test_config(),
+      send_fn: mock_send_fn(),
+    )
+
+  let override =
+    agent.AgentConfigOverride(model: None, api_base: None, system_prompt: None)
+
+  let result =
+    agent_tree.spawn_child(
+      tree: tree,
+      id: "child-1",
+      label: "Child",
+      parent_id: "no-such-parent",
+      goal: "test",
+      initial_message: "test",
+      override: override,
+    )
+  case result {
+    Error(agent_tree.ParentNotFound(id)) -> id |> should.equal("no-such-parent")
+    _ -> should.fail()
+  }
+}
+
+pub fn spawn_grandchild_test() {
   let assert Ok(tree) =
     agent_tree.start_with_send_fn(
       config: test_config(),
@@ -183,32 +265,129 @@ pub fn list_agents_test() {
     agent.AgentConfigOverride(model: None, api_base: None, system_prompt: None)
 
   let assert Ok(_) =
+    agent_tree.spawn_root(
+      tree: tree,
+      id: "root-1",
+      label: "Root",
+      system_prompt: "test",
+    )
+  let assert Ok(_) =
+    agent_tree.spawn_child(
+      tree: tree,
+      id: "child-1",
+      label: "Child",
+      parent_id: "root-1",
+      goal: "test",
+      initial_message: "test",
+      override: override,
+    )
+  let assert Ok(_) =
+    agent_tree.spawn_child(
+      tree: tree,
+      id: "grandchild-1",
+      label: "Grandchild",
+      parent_id: "child-1",
+      goal: "test",
+      initial_message: "test",
+      override: override,
+    )
+
+  // Tree should have depth 3
+  let roots = agent_tree.get_tree(tree: tree)
+  let assert Ok(root_node) = list.first(roots)
+  let assert Ok(child_node) = list.first(root_node.children)
+  let assert Ok(grandchild_node) = list.first(child_node.children)
+  grandchild_node.info.id
+  |> should.equal("grandchild-1")
+  grandchild_node.info.parent_id
+  |> should.equal(Some("child-1"))
+}
+
+// ============================================================================
+// Tests: Get children / get parent
+// ============================================================================
+
+pub fn get_children_test() {
+  let assert Ok(tree) =
+    agent_tree.start_with_send_fn(
+      config: test_config(),
+      send_fn: mock_send_fn(),
+    )
+
+  let override =
+    agent.AgentConfigOverride(model: None, api_base: None, system_prompt: None)
+
+  let assert Ok(_) =
+    agent_tree.spawn_root(
+      tree: tree,
+      id: "root-1",
+      label: "Root",
+      system_prompt: "test",
+    )
+  let assert Ok(_) =
     agent_tree.spawn_child(
       tree: tree,
       id: "child-a",
-      label: "Agent A",
+      label: "A",
+      parent_id: "root-1",
+      goal: "test",
+      initial_message: "test",
       override: override,
     )
   let assert Ok(_) =
     agent_tree.spawn_child(
       tree: tree,
       id: "child-b",
-      label: "Agent B",
+      label: "B",
+      parent_id: "root-1",
+      goal: "test",
+      initial_message: "test",
       override: override,
     )
 
-  let agents = agent_tree.list_agents(tree: tree)
-  list.length(agents)
-  |> should.equal(3)
+  let children = agent_tree.get_children(tree: tree, parent_id: "root-1")
+  list.length(children)
+  |> should.equal(2)
+}
 
-  // Root should be first
-  let assert Ok(first) = list.first(agents)
-  first.id
-  |> should.equal("root")
+pub fn get_parent_test() {
+  let assert Ok(tree) =
+    agent_tree.start_with_send_fn(
+      config: test_config(),
+      send_fn: mock_send_fn(),
+    )
+
+  let override =
+    agent.AgentConfigOverride(model: None, api_base: None, system_prompt: None)
+
+  let assert Ok(_) =
+    agent_tree.spawn_root(
+      tree: tree,
+      id: "root-1",
+      label: "Root",
+      system_prompt: "test",
+    )
+  let assert Ok(_) =
+    agent_tree.spawn_child(
+      tree: tree,
+      id: "child-1",
+      label: "Child",
+      parent_id: "root-1",
+      goal: "test",
+      initial_message: "test",
+      override: override,
+    )
+
+  agent_tree.get_parent(tree: tree, child_id: "child-1")
+  |> should.equal(Some("root-1"))
+
+  // Root has no parent
+  agent_tree.get_parent(tree: tree, child_id: "root-1")
+  |> should.equal(None)
 }
 
 // ============================================================================
-// Tests: Config merge
+// Tests: Config merge (unchanged — still on agent module)
 // ============================================================================
 
 pub fn merge_config_full_override_test() {
@@ -270,4 +449,36 @@ pub fn merge_config_no_override_test() {
   |> should.equal("test-key")
   child.system_prompt
   |> should.equal("You are a test assistant.")
+}
+
+// ============================================================================
+// Tests: Status updates
+// ============================================================================
+
+pub fn update_status_test() {
+  let assert Ok(tree) =
+    agent_tree.start_with_send_fn(
+      config: test_config(),
+      send_fn: mock_send_fn(),
+    )
+
+  let assert Ok(_) =
+    agent_tree.spawn_root(
+      tree: tree,
+      id: "root-1",
+      label: "Root",
+      system_prompt: "test",
+    )
+
+  agent_tree.update_status(
+    tree: tree,
+    agent_id: "root-1",
+    status: agent_info.AgentRunning,
+  )
+
+  // Status should be reflected in the tree
+  let roots = agent_tree.get_tree(tree: tree)
+  let assert Ok(root_node) = list.first(roots)
+  root_node.info.status
+  |> should.equal(agent_info.AgentRunning)
 }
