@@ -1,13 +1,13 @@
 import gleam/dynamic
+import gleam/list
 import gleam/option.{None}
-import gleam/string
 import gleeunit/should
-import lustre/element
 
 import eddie/coerce
 import eddie/widget
 
 import eddie/widgets/token_usage
+import eddie_shared/protocol
 
 // ============================================================================
 // Factory tests
@@ -31,11 +31,10 @@ pub fn empty_view_tools_test() {
   |> should.equal([])
 }
 
-pub fn empty_view_html_test() {
+pub fn empty_view_state_test() {
   let handle = token_usage.create()
-  let html = element.to_string(widget.view_html(handle))
-  string.contains(html, "No requests yet")
-  |> should.be_true
+  widget.view_state(handle)
+  |> should.equal([])
 }
 
 // ============================================================================
@@ -48,13 +47,9 @@ pub fn record_single_usage_test() {
   let assert Ok(updated) =
     widget.send(handle: handle, msg: coerce.unsafe_coerce(msg))
 
-  let html = element.to_string(widget.view_html(updated))
-  string.contains(html, "1 requests")
-  |> should.be_true
-  string.contains(html, "in: 100")
-  |> should.be_true
-  string.contains(html, "out: 50")
-  |> should.be_true
+  let events = widget.view_state(updated)
+  events
+  |> should.equal([protocol.TokensUsed(input: 100, output: 50)])
 }
 
 pub fn record_multiple_usage_test() {
@@ -65,14 +60,9 @@ pub fn record_multiple_usage_test() {
   let msg2 = token_usage.UsageRecorded(input_tokens: 200, output_tokens: 75)
   let assert Ok(h2) = widget.send(handle: h1, msg: coerce.unsafe_coerce(msg2))
 
-  let html = element.to_string(widget.view_html(h2))
-  string.contains(html, "2 requests")
-  |> should.be_true
-  // Total input: 300, output: 125
-  string.contains(html, "in: 300")
-  |> should.be_true
-  string.contains(html, "out: 125")
-  |> should.be_true
+  let events = widget.view_state(h2)
+  list.length(events)
+  |> should.equal(2)
 }
 
 pub fn record_large_token_count_test() {
@@ -82,13 +72,9 @@ pub fn record_large_token_count_test() {
   let assert Ok(updated) =
     widget.send(handle: handle, msg: coerce.unsafe_coerce(msg))
 
-  let html = element.to_string(widget.view_html(updated))
-  // 15000 should display as "15.0K"
-  string.contains(html, "15.0K")
-  |> should.be_true
-  // 2500000 should display as "2.5M"
-  string.contains(html, "2.5M")
-  |> should.be_true
+  let events = widget.view_state(updated)
+  events
+  |> should.equal([protocol.TokensUsed(input: 15_000, output: 2_500_000)])
 }
 
 // ============================================================================
@@ -127,11 +113,7 @@ pub fn request_numbers_sequential_test() {
   let msg3 = token_usage.UsageRecorded(input_tokens: 30, output_tokens: 15)
   let assert Ok(h3) = widget.send(handle: h2, msg: coerce.unsafe_coerce(msg3))
 
-  let html = element.to_string(widget.view_html(h3))
-  string.contains(html, "#1:")
-  |> should.be_true
-  string.contains(html, "#2:")
-  |> should.be_true
-  string.contains(html, "#3:")
-  |> should.be_true
+  let events = widget.view_state(h3)
+  list.length(events)
+  |> should.equal(3)
 }

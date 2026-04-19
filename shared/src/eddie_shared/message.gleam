@@ -2,6 +2,8 @@
 ///
 /// Widgets produce and consume these types. The backend's LLM client
 /// handles conversion to/from the wire format (glopenai).
+import gleam/json
+
 /// A single piece of content within a message.
 pub type MessagePart {
   /// System-level instruction (only in requests)
@@ -24,4 +26,64 @@ pub type Message {
   Request(parts: List(MessagePart))
   /// A message from the model (text, tool calls)
   Response(parts: List(MessagePart))
+}
+
+// ============================================================================
+// JSON encoding
+// ============================================================================
+
+pub fn message_part_to_json(part: MessagePart) -> json.Json {
+  case part {
+    SystemPart(content) ->
+      json.object([
+        #("type", json.string("system")),
+        #("content", json.string(content)),
+      ])
+    UserPart(content) ->
+      json.object([
+        #("type", json.string("user")),
+        #("content", json.string(content)),
+      ])
+    TextPart(content) ->
+      json.object([
+        #("type", json.string("text")),
+        #("content", json.string(content)),
+      ])
+    ToolCallPart(tool_name, arguments_json, tool_call_id) ->
+      json.object([
+        #("type", json.string("tool_call")),
+        #("tool_name", json.string(tool_name)),
+        #("arguments_json", json.string(arguments_json)),
+        #("tool_call_id", json.string(tool_call_id)),
+      ])
+    ToolReturnPart(tool_name, content, tool_call_id) ->
+      json.object([
+        #("type", json.string("tool_return")),
+        #("tool_name", json.string(tool_name)),
+        #("content", json.string(content)),
+        #("tool_call_id", json.string(tool_call_id)),
+      ])
+    RetryPart(tool_name, content, tool_call_id) ->
+      json.object([
+        #("type", json.string("retry")),
+        #("tool_name", json.string(tool_name)),
+        #("content", json.string(content)),
+        #("tool_call_id", json.string(tool_call_id)),
+      ])
+  }
+}
+
+pub fn message_to_json(message: Message) -> json.Json {
+  case message {
+    Request(parts) ->
+      json.object([
+        #("role", json.string("request")),
+        #("parts", json.array(parts, message_part_to_json)),
+      ])
+    Response(parts) ->
+      json.object([
+        #("role", json.string("response")),
+        #("parts", json.array(parts, message_part_to_json)),
+      ])
+  }
 }

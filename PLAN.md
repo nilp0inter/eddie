@@ -1,250 +1,305 @@
-# Eddie Implementation Plan
+# Eddie Architecture Refactor Plan
 
 ## Context
 
-Eddie is a Gleam reimplementation of Calipso — an Elm-architecture widget system that builds shared context between a user and an AI agent. Each widget has a model, typed messages, a pure update function, and three views: LLM messages, LLM tools, and browser HTML.
+Eddie's current architecture has two fundamental limitations:
 
-Key differences from Calipso:
-- **OTP multi-agent** (not mono-agent) with hierarchical agent spawning
-- **Lustre** for both server-side widget HTML (element types) and client-side SPA
-- **glopenai** (sans-IO) + **gleam_httpc** for LLM calls
-- **sextant** for JSON Schema generation/validation (structured output)
-- Tool-call + native structured output strategies with retry loop
+1. **The agent blocks on LLM calls.** The synchronous `do_run_turn` loop in `agent.gleam` ties up the actor while waiting for HTTP responses. User messages arriving during a turn cannot be processed.
 
-Reference files:
-- `reference/calipso/` — Python reference implementation
-- `reference/glopenai/` — Gleam OpenAI client (hex.pm)
-- `reference/sextant/` — Gleam JSON Schema library (hex.pm)
-- `reference/pydantic-ai/structured-output-internals.md` — parsing spec
+2. **The backend owns the presentation layer.** ~~Widgets produce HTML via `view_html`, the server sends HTML fragments over WebSocket, and the frontend is hand-crafted JavaScript embedded in `frontend.gleam`. This couples backend state management to browser rendering.~~ **(Resolved in Phase 2.)** Widgets now produce `List(ServerEvent)` via `view_state`, and the backend broadcasts JSON-encoded domain events over WebSocket. The `lustre` dependency has been removed from the backend. A minimal event-logging JS stub serves as the temporary frontend.
+
+The target architecture:
+- **Non-blocking reactive agent actor** — not a state machine, just an actor that reacts to messages. LLM calls and tool effects are spawned as async processes. The agent never blocks.
+- **Three Gleam projects** — `backend/` (Erlang), `frontend/` (JavaScript, Lustre SPA), `shared/` (both targets, domain types + codecs).
+- **Domain event protocol** — high-level typed messages (`GoalUpdated`, `TaskCreated`, `UserMessage`, etc.) cross the WebSocket boundary instead of HTML fragments.
+- **User and LLM as external peers** — both interact with the agent via fire-and-forget messages. The agent broadcasts state changes to all subscribers.
 
 ---
 
-## Phase 1: Core Types and Widget Abstraction ✅
+## Phase 1: Create the shared package and monorepo layout ✅
 
-**Status:** Complete — 28 tests passing, glinter clean (1 expected unused_export for `view_html`).
+**Status: Complete.**
 
-**Implemented:**
-- `src/eddie/cmd.gleam` — `Initiator` (LLM/UI), `Cmd(msg)` (CmdNone/CmdToolResult/CmdEffect), `for_initiator`
-- `src/eddie/message.gleam` — `MessagePart`, `Message`, bidirectional glopenai conversion
-- `src/eddie/tool.gleam` — `ToolDefinition`, `ToolError`, `new` (returns Result), `to_chat_tool`
-- `src/eddie/widget.gleam` — `WidgetConfig(model, msg)`, `WidgetHandle` (opaque, type-erased via closures + `WidgetFns` bundle), `SendError`, full Cmd loop execution
-- `src/eddie/coerce.gleam` + `src/eddie_ffi.erl` — unsafe coercion for type erasure boundary
+Restructured into three sibling directories. Extracted pure domain types and protocol codecs into `shared/`. Backend compiles and all 164 tests pass.
 
-**Key design decisions made during implementation:**
-- `WidgetHandle` uses an internal `WidgetFns` record to bundle the function table, avoiding 10-parameter threading
-- `tool.new` returns `Result(ToolDefinition, ToolError)` instead of panicking
-- `widget.send` returns `Result(WidgetHandle, SendError)` instead of asserting CmdNone
-- `CmdEffect` is executed synchronously within the Cmd loop (BEAM processes are lightweight)
-- Args passed to `from_llm`/`from_ui` as `Dynamic` (parsed from JSON by the caller)
-- All public functions use labelled arguments per glinter
+### What was done
 
-**Dependencies added:** `gleam_json`, `lustre`, `glopenai`, `glinter` (dev)
+- Moved all source into `backend/`, created `shared/` and `frontend/` stubs.
+- Extracted `MessagePart`, `Message`, `TaskStatus`, `Task`, `ToolDefinition`, `Initiator`, `TurnResult` into `shared/src/eddie_shared/`.
+- Defined `ServerEvent`, `ClientCommand`, and snapshot types in `shared/src/eddie_shared/protocol.gleam`.
+- Backend imports shared types; keeps glopenai conversion functions locally.
+- Updated `Taskfile.yml` for monorepo (component:target pattern).
+- Updated `CLAUDE.md` with new project structure.
 
 ---
 
-## Phase 2: SystemPrompt and ConversationLog Widgets ✅
+## Phase 2: Replace `view_html` with `view_state` on the backend ✅
 
-**Status:** Complete — 64 tests passing (28 Phase 1 + 36 Phase 2), glinter clean (expected warnings only).
+**Status: Complete.**
 
-**Implemented:**
-- `src/eddie/widgets/system_prompt.gleam` — `SystemPromptModel`, `SetSystemPrompt`/`ResetSystemPrompt` msgs, `create(text:)`/`create_default()` factories, UI-only (no LLM tools), default text with Eddie identity
-- `src/eddie/widgets/conversation_log.gleam` — Full task lifecycle (`Pending -> InProgress -> Done`), `ConversationLogModel` with reversed-list prepend strategy, 14 message types, 6 LLM tools (conditional availability based on state), `check_protocol` enforcement, `view_messages` with task collapsing/expansion, `from_llm`/`from_ui` anticorruption with `gleam/dynamic/decode`
+Widgets produce `List(ServerEvent)` instead of HTML. The agent broadcasts JSON-encoded domain events. The `lustre` dependency has been removed from the backend.
 
-**Key design decisions made during implementation:**
-- Log and task_order use reversed lists (prepend during update, reverse during view) for efficient append
-- Memories stored reversed internally, displayed in original order via `list.reverse`
-- `check_protocol` extracted as a standalone public function (not embedded in dispatch) for Phase 3 Context to call
-- `current_owning_task_id` exposed for Phase 3 Context to tag log items
-- `from_ui` handlers extracted into named functions to reduce nesting
-- `set_task` helper reduces boilerplate for task dict updates
-- `decode_field_string`/`decode_field_int`/`decode_ui_int` helpers reduce decoder boilerplate
-- `task_id_schema()` shared across tool definitions to avoid duplication
-- Tool definitions constructed lazily per `view_tools` call (no module-level state)
+### What was done
 
-**Tests cover:**
-- SystemPrompt: create with custom/default text, view_messages, dispatch_llm error, set/reset via UI, unknown event
-- ConversationLog: full task lifecycle (create → start → memory → close), protocol violations (start when active, close without memory, close no active task, memory no active task, remove non-pending, pick non-done, start non-pending), view_messages (protocol rules, collapsing, picked expansion, consume picks, open tasks block, in-progress not collapsed), from_llm/from_ui (unknown tool, UI create/toggle, empty description ignored), ID sequencing
+**Shared package — JSON encoders added:**
+- `message.gleam`: `message_part_to_json`, `message_to_json`
+- `task.gleam`: `status_to_json`
+- `turn_result.gleam`: `to_json`
+- `protocol.gleam`: `server_event_to_json`, `server_events_to_json_string`, and encoders for all snapshot types (`TaskSnapshot`, `LogItemSnapshot`, `DirectorySnapshot`, `FileSnapshot`, `TokenRecord`)
 
----
+**Widget infrastructure:**
+- `widget.gleam`: `view_html: fn(model) -> Element(Nil)` → `view_state: fn(model) -> List(ServerEvent)` across `WidgetConfig`, `WidgetFns`, `WidgetHandle`
+- `context.gleam`: `current_html`/`changed_html` → `current_state`/`changed_state` returning `List(ServerEvent)`. `HtmlEntry` → `StateEntry` using structural equality for change detection.
+- `agent.gleam`: `GetCurrentHtml` → `GetCurrentState`. `notify_subscribers` sends JSON-encoded `ServerEvent` lists. Tool call/result notifications use `ToolCallStarted`/`ToolCallCompleted` protocol events.
+- `server.gleam`: WebSocket sends JSON domain events. Turn start/complete use protocol events.
 
-## Phase 3: Context Compositor and LLM Client ✅
+**Widget view_state implementations:**
+- `system_prompt`: `[SystemPromptUpdated(text: model.text)]`
+- `goal`: `[GoalUpdated(text: model.text)]`
+- `token_usage`: `[TokensUsed(input, output)]` per record (chronological order)
+- `file_explorer`: `[FileExplorerUpdated(directories: [...], files: [...])]`
+- `conversation_log`: `TaskCreated` per task + `ConversationAppended` per log item
 
-**Status:** Complete — 93 tests passing (64 Phase 1+2 + 29 Phase 3), glinter clean (expected warnings only).
+**Frontend:** Replaced with a minimal event-logging stub that displays raw JSON events in the browser console.
 
-**Implemented:**
-- `src/eddie/context.gleam` — Root compositor with opaque `Context` type, `new`, `view_messages`, `view_tools`, `add_user_message`, `add_response`, `add_tool_results`, `consume_picks`, `handle_tool_call` (with protocol enforcement), `handle_widget_event`, `changed_html`, accessors
-- `src/eddie/llm.gleam` — Sans-IO LLM client bridge: `LlmConfig`, `build_request` (glopenai request building), `parse_response` (response parsing into Eddie types), `LlmError` type
-- `src/eddie/http.gleam` — HTTP execution layer: `send` via gleam_httpc, `HttpError` type
-- `src/eddie/widgets/conversation_log.gleam` — Added typed API: `ConversationLog` opaque type, `init`, `to_handle`, `protocol_check`, `owning_task_id`, `dispatch_tool`, `dispatch_event`, `send_msg`, `typed_view_messages`, `typed_view_tools`, `typed_view_html`
-
-**Key design decisions made during implementation:**
-- Context stores `ConversationLog` (typed) instead of `WidgetHandle` for the conversation log, giving it direct access to protocol checking and owning task id without breaking type erasure
-- `ConversationLog` opaque type added to conversation_log module — wraps the model and provides typed dispatch/send functions, with its own Cmd loop implementation
-- Tool owners map rebuilt after every state mutation to keep it in sync with conditional tool availability
-- Conversation log tools always registered in tool_owners even when conditionally hidden from view_tools
-- `changed_html` uses string comparison of rendered HTML to detect changes
-- `llm.gleam` follows sans-IO pattern: builds glopenai `Request(String)`, parses `Response(String)` — no network IO
-
-**Dependencies added:** `gleam_httpc`, `gleam_http`
-
-**Tests cover:**
-- Context: message composition order (system → children → log), tool composition, tool dispatch routing (to conversation_log, to child widgets, unknown tool error), protocol enforcement (rejects outside task, allows task management, allows protocol-free tools), user message recording, response recording, UI event dispatch, changed_html detection, accessors, full task lifecycle through context
-- LLM: request building (method/path, auth header, model, messages, tools), response parsing (text-only, tool calls, empty choices, API errors)
+**Removed:** `lustre` dependency from `backend/gleam.toml`, all `lustre/*` imports from backend source and tests.
 
 ---
 
-## Phase 4: Agent Loop, Web Server, and Frontend ✅
+## Phase 3: Non-blocking reactive agent
 
-**Status:** Complete — 98 tests passing (93 Phase 1-3 + 5 Phase 4), glinter clean (expected warnings only).
+**Goal:** Replace the synchronous `do_run_turn` loop with a reactive actor that never blocks. No state machine — the agent simply reacts to each incoming message based on its current data.
 
-**Goal:** First working end-to-end chat in the browser. Eddie is fully web — no CLI REPL. **MILESTONE 1.**
+### Design principle
 
-**Corresponds to:** `calipso/runner.py`, `calipso/server.py`, `calipso/static/index.html`
+The agent is a plain OTP actor. It holds domain state and reacts to messages. Its behavior emerges from the data (is there an LLM call in flight? are there pending effects? are there queued user messages?) rather than from an explicit phase enum.
 
-**Implemented:**
-- `src/eddie/agent.gleam` — OTP actor with `AgentConfig`, opaque `AgentMessage` (RunTurn/GetState/Subscribe/Unsubscribe/DispatchEvent), `TurnResult` (TurnSuccess/TurnError). Recursive turn loop with injectable `send_fn` for testability. Subscriber notification via `context.changed_html` + HTML fragment OOB wrapping.
-- `src/eddie/server.gleam` — mist HTTP + WebSocket. Routes: `GET /` (inline HTML), `GET /ws` (WebSocket upgrade). WebSocket handler: Selector-based dual Subject (HTML updates + turn results). User input spawns helper process calling `agent.run_turn`. Widget events forwarded via `agent.dispatch_event`.
-- `src/eddie.gleam` — Entry point: reads `OPENROUTER_API_KEY` (required), `OPENROUTER_API_BASE`, `EDDIE_MODEL`, `EDDIE_PORT` from env. Creates agent + mist server, sleeps forever.
-- Inline HTML frontend (inside server.gleam): Catppuccin-themed chat UI with sidebar widget panels, WebSocket auto-reconnect, manual OOB swap (no htmx dependency), thinking indicator.
-- `src/eddie_ffi.erl` — Added `get_env/1` for environment variable access.
+### Agent state
 
-**Key design decisions made during implementation:**
-- Chose inline HTML + plain JS over Lustre SPA for Milestone 1 simplicity; Lustre SPA deferred to potential Phase 4b
-- Agent uses `actor.new` directly (no supervision tree) — sufficient for single-agent Milestone 1
-- Mock HTTP sender uses a response queue actor (separate process) since `process.receive` requires Subject ownership
-- `json_to_dynamic` uses `decode.new_primitive_decoder` identity decoder to convert parsed JSON to Dynamic
-- `send_run_turn` spawns a helper process to call blocking `agent.run_turn` without blocking the WebSocket handler
-- AgentMessage is opaque — server interacts only through public API functions
+```gleam
+pub type AgentState {
+  AgentState(
+    context: Context,
+    config: LlmConfig,
+    subscribers: List(Subject(List(ServerEvent))),
+    send_fn: fn(Request(String)) -> Response(String),
+    // Async bookkeeping — just data, not "phases"
+    llm_in_flight: Bool,
+    pending_user_messages: List(String),
+    pending_effects: Dict(String, EffectContinuation),
+    iteration: Int,
+  )
+}
+```
 
-**Dependencies added:** `gleam_otp`, `gleam_erlang`, `mist`
+`pending_effects` tracks in-flight `CmdEffect` processes. Each is keyed by the tool call ID it belongs to. `EffectContinuation` holds the `resume` closure (see below).
 
-**Tests cover:**
-- Simple text response (mock LLM returns text, verify TurnSuccess)
-- Tool call dispatch (create_task tool call then text response)
-- Full task lifecycle (create+start, memory, close, final text)
-- HTTP error returns TurnError
-- Subscriber receives HTML update notifications
+### Agent messages
 
----
+```gleam
+pub type AgentMessage {
+  // From external sources (users, other actors)
+  UserMessage(text: String)
+  UserCommand(command: ClientCommand)
+  Subscribe(subscriber: Subject(List(ServerEvent)))
+  Unsubscribe(subscriber: Subject(List(ServerEvent)))
 
-## Phase 5: Structured Output Layer ✅
+  // From spawned LLM process
+  LlmResponse(response: Response(String))
+  LlmError(reason: String)
 
-**Status:** Complete — 113 tests passing (98 Phase 1-4 + 15 Phase 5), glinter clean (expected warnings only).
+  // From spawned effect process
+  ToolEffectResult(call_id: String, data: Dynamic)
+  ToolEffectCrashed(call_id: String, reason: String)
+}
+```
 
-**Goal:** Mini pydantic-ai — tool-call + native structured output strategies with retry.
+### Message handling (reactive, not state-machine)
 
-**Corresponds to:** `reference/pydantic-ai/structured-output-internals.md`
+Each message handler checks the current state and acts accordingly:
 
-**Implemented:**
-- `src/eddie/structured_output.gleam` — Sans-IO structured output extraction with two strategies:
-  - `OutputSchema(a)`: wraps `sextant.JsonSchema(a)` with name + description
-  - `Strategy`: `ToolCallStrategy` (fake tool whose args are the schema) or `NativeStrategy` (response_format json_schema)
-  - `extract(config, messages, output, strategy, max_retries, send_fn)` — main extraction function with injectable send_fn
-  - `StructuredOutputError`: `SendError`, `ApiError`, `EmptyResponse`, `MaxRetriesExceeded`, `UnexpectedResponse`
-  - Retry loop: validation failure → structured error feedback → re-request → re-validate
-  - `strip_markdown_fences` utility for LLMs that wrap JSON in code fences
-  - `strip_dollar_schema` strips the `$schema` key from sextant output for tool parameters
-- `src/eddie_ffi.erl` — Added `dynamic_to_json/1` FFI for re-encoding Dynamic values to json.Json
-- `test/eddie_test_ffi.erl` — Erlang atomics-based counter for sequencing mock responses in tests
+**`UserMessage(text)`:**
+- Add message to context, broadcast `ConversationAppended`
+- If `!llm_in_flight` and no pending effects: compose LLM request, spawn HTTP process, set `llm_in_flight = True`, broadcast `TurnStarted`
+- If busy: append to `pending_user_messages`
 
-**Key design decisions made during implementation:**
-- Sans-IO pattern: `extract` takes a `send_fn` callback, same pattern as `agent.gleam` — no HTTP dependency
-- Both strategies share the same `parse_and_validate` → `AttemptResult` → retry pipeline
-- Tool-call retry echoes back the failed tool call + RetryPart to keep conversation well-formed
-- Native retry sends error as UserPart (no tool call to echo)
-- `strip_dollar_schema` uses `encode_dynamic` FFI (same as glopenai's `codec.dynamic_to_json`) to re-serialize dict entries
-- Markdown fence stripping handles `\`\`\`json` and `\`\`\`` patterns (common with some models)
+**`UserCommand(command)`:**
+- Dispatch to the appropriate widget as a UI event (always lightweight, no IO)
+- Broadcast resulting `ServerEvent`s
+- No queuing needed — these are instant state mutations
 
-**Dependencies added:** `sextant`
+**`LlmResponse(response)`:**
+- Set `llm_in_flight = False`
+- Parse response, record in context, broadcast events
+- If text-only response: broadcast `TurnCompleted(Success)`, then drain queued user messages (if any, pick the next one and start a new turn)
+- If tool calls: dispatch each tool call through context. For each:
+  - If result is `Completed(handle, result)`: record result, broadcast `ToolCallStarted`/`ToolCallCompleted`
+  - If result is `EffectPending(perform, resume)`: spawn a process to run `perform`, store the `resume` continuation in `pending_effects`, broadcast `ToolCallStarted`
+  - After all non-effect calls are processed: if no pending effects, compose next LLM request and spawn it. If pending effects exist, wait for them to complete.
 
-**Tests cover:**
-- Tool-call strategy: valid extraction, markdown fences, scalar wrapping (single-field object)
-- Native strategy: valid extraction, no text returns UnexpectedResponse
-- Retry loop: validation error then correction (tool-call and native), max retries exceeded with error details
-- Error cases: send error, empty response, tool-call with text-only response, native with tool-call response
-- Existing messages forwarded correctly
+**`LlmError(reason)`:**
+- Set `llm_in_flight = False`
+- Broadcast `TurnCompleted(Error(reason))`
+- Drain queued user messages
 
----
+**`ToolEffectResult(call_id, data)`:**
+- Look up `resume` in `pending_effects`, remove it
+- Call `resume(data)` → may return `Completed` or another `EffectPending`
+- If `EffectPending`: spawn again, store new `resume`
+- If `Completed`: record tool result, broadcast `ToolCallCompleted`
+- If no more pending effects: compose next LLM request, spawn it
 
-## Phase 6: Hierarchical Agents and Additional Widgets ✅
+**`ToolEffectCrashed(call_id, reason)`:**
+- Remove from `pending_effects`
+- Record error as tool result, broadcast `ToolCallCompleted` with error
+- If no more pending effects: compose next LLM request, spawn it
 
-**Status:** Complete — 164 tests passing (155 Phase 1-5 + 9 Phase 6), glinter clean (expected warnings only).
+### The EffectPending/Completed pattern in widget dispatch
 
-**Goal:** Multi-agent spawning and remaining Calipso widgets.
+`dispatch_llm` on `WidgetHandle` changes its return type:
 
-**Implemented:**
-- `src/eddie/widgets/goal.gleam` — Protocol-free goal widget with `SetGoal`/`ClearGoal` messages, `set_goal`/`clear_goal` tools (both LLM + UI), `GoalModel(text: Option(String))`, `create(text:)`/`create_default()` factories
-- `src/eddie/widgets/file_explorer.gleam` — Filesystem navigation with `CmdEffect` for IO, `open_directory`/`close_directory`/`read_file`/`close_read_file` tools, directory listing with entry classification, all protocol-free
-- `src/eddie/widgets/token_usage.gleam` — Display-only token tracking, `UsageRecorded` via `widget.send()`, `format_tokens` with K/M suffix formatting, no LLM tools/messages
-- `src/eddie/agent_tree.gleam` — Hierarchical agent management with opaque `AgentTree(root, children)`, `spawn_child`/`get_child`/`children`, `SpawnError` (ChildAlreadyExists/ChildStartFailed)
-- `src/eddie/agent.gleam` — Added `AgentConfigOverride`/`merge_config`, integrated goal/file_explorer/token_usage as child widgets in `build_context`, `record_token_usage` sends usage data after each LLM response
-- `src/eddie/llm.gleam` — Added `TokenUsage` type, `parse_response` now returns `#(Message, Option(TokenUsage))`
+```gleam
+pub type DispatchResult {
+  Completed(handle: WidgetHandle, result: Result(String, String))
+  EffectPending(
+    handle: WidgetHandle,
+    perform: fn() -> Dynamic,
+    resume: fn(Dynamic) -> DispatchResult,
+  )
+}
+```
 
-**Key design decisions made during implementation:**
-- Config merge lives in `agent.gleam` (not a separate `config.gleam`) to avoid module fragmentation
-- `AgentTree` uses direct actor spawning (no OTP supervisor) — sufficient for current needs
-- API key always inherited from parent (never overridden) for security
-- Token usage widget receives data via `widget.send` from the agent turn loop after each LLM response
-- File explorer uses `simplifile` for filesystem operations, executed synchronously in `CmdEffect`
-- All three new widgets are protocol-free (callable without active task)
+The `resume` closure captures the typed widget internals (model, fns, to_msg) so the agent never needs to know the concrete types. When `execute_cmd_loop` hits a `CmdEffect`, instead of running it inline, it returns `EffectPending` with the thunk and a continuation that will feed the result back into `update` and continue the loop.
 
-**Dependencies added:** `simplifile`
+### Public API
 
-**Tests cover:**
-- Goal: create with/without text, set/clear via LLM/UI, unknown tool, missing field, protocol-free tools, frontend tools, view_tools/view_messages
-- File Explorer: open directory (real IO), default path, nonexistent directory, read file, nonexistent file, missing path, close directory/file, close nonexistent, reopen refreshes, UI dispatch, unknown tool, protocol-free tools, view_tools
-- Token Usage: empty state (messages/tools/html), single/multiple usage records, large token formatting (K/M), from_llm always errors, from_ui always None, sequential request numbering
-- Agent Tree: start tree, root usable, spawn child, child usable, duplicate child fails, nonexistent child fails, children dict
-- Config Merge: full override, partial override, no override (inherits parent)
-- LLM: parse_response returns usage, parse_response handles missing usage
+All fire-and-forget via `process.send`:
+- `send_message(agent, text)` — wraps as `UserMessage`
+- `send_command(agent, command)` — wraps as `UserCommand`
+- `subscribe(agent, subject)` / `unsubscribe(agent, subject)`
 
----
+No blocking `process.call` anywhere. The agent broadcasts `ServerEvent`s to subscribers.
 
-## Phase 7: Frontend Parity with Calipso ✅
+### Key files to modify
+- `backend/src/eddie/agent.gleam` — complete rewrite of message handling
+- `backend/src/eddie/widget.gleam` — `dispatch_llm` returns `DispatchResult`, `execute_cmd_loop` returns `EffectPending` instead of running effects
+- `backend/src/eddie/server.gleam` — remove `run_turn` call, relay `ClientCommand`s
+- `backend/test/eddie/agent_test.gleam` — rewrite: send message, assert event sequence on subscriber
 
-**Status:** Complete — 164 tests passing, glinter clean (expected warnings only).
-
-**Goal:** Bring the browser frontend to functional parity with the Calipso Python reference. All widget HTML stubs replaced with fully interactive implementations.
-
-**Implemented:**
-- `src/eddie/server.gleam` — VS Code-style activity bar layout (48px icon strip + 320px collapsible side panel), `sendWidgetEvent` JS function for widget interactivity, `togglePanel`/`notifyWidgetUpdate` for panel management with notification badges, client-side markdown renderer (regex-based), tool call/result rendering as collapsible `<details>` blocks in the chat stream, Catppuccin-themed CSS for all components
-- `src/eddie/widgets/system_prompt.gleam` — `view_html` wired with `onclick` handlers for Save/Reset buttons
-- `src/eddie/widgets/goal.gleam` — `view_html` wired with `onkeydown` Enter-key handler and `onclick` for Set/Clear buttons
-- `src/eddie/widgets/file_explorer.gleam` — `view_html` wired with Root button, `ondblclick` for directory/file navigation, close buttons, `escape_js` helper for safe inline JS
-- `src/eddie/widgets/conversation_log.gleam` — Full `view_html` rewrite: create-task input, pending/in-progress/done task panels, memory add/remove, collapsible done tasks with `ontoggle`
-- `src/eddie/widgets/token_usage.gleam` — SVG stacked bar chart (blue input, orange output) with native browser tooltips, last 20 requests
-- `src/eddie/agent.gleam` — `notify_tool_call`/`notify_tool_result` send JSON progress messages to WebSocket subscribers during tool dispatch
-
-**Key design decisions made during implementation:**
-- Client-side markdown rendering via regex (no external JS dependencies) rather than server-side Gleam rendering — see [trade-off card 12](docs/src/decisions/tradeoffs/12-client-side-markdown-rendering.md)
-- Activity bar icon buttons with notification badges match Calipso's VS Code-style layout
-- Widget event handlers embedded as inline JS strings (`onclick`, `onkeydown`, `ondblclick`) calling `sendWidgetEvent` — straightforward but untyped
-- Tool call progress sent as JSON alongside HTML OOB fragments, reusing the existing subscriber mechanism
-- `escape_js` helper in file_explorer prevents injection from file paths with special characters
-
-**Dependencies added:** — (no new dependencies)
-
-**Tests cover:**
-- All 164 existing tests pass unchanged — frontend changes are purely in `view_html` (not tested for exact HTML) and agent notifications (tested indirectly via subscriber test)
+### Verification
+- `cd backend && gleam test` — all tests pass
+- Manual: send messages via WebSocket, observe event stream, verify user messages queue while LLM is processing
 
 ---
 
-## Dependency Summary
+## Phase 4: Lustre SPA frontend
 
-| Phase | New Dependencies |
-|-------|-----------------|
-| 1 | gleam_json, lustre, glopenai |
-| 2 | — |
-| 3 | gleam_httpc, gleam_http |
-| 4 | gleam_otp, gleam_erlang, mist |
-| 5 | sextant |
-| 6 | simplifile |
-| 7 | — |
+**Goal:** Build the frontend as a Lustre app that connects via WebSocket and renders domain events.
 
-## Verification
+### Frontend structure
 
-After each phase, run `task tests:unit` to verify all tests pass. Key end-to-end checkpoints:
+```
+frontend/
+├── gleam.toml
+└── src/
+    ├── eddie_frontend.gleam        # lustre.application(init, update, view)
+    └── eddie_frontend/
+        ├── model.gleam             # Model type (connection, chat, widget states, UI state)
+        ├── msg.gleam               # Msg type (server events + user interactions)
+        ├── update.gleam            # update function
+        ├── view.gleam              # top-level view (layout, routing)
+        ├── websocket.gleam         # WebSocket effect (connect, send, receive)
+        ├── view/
+        │   ├── chat.gleam          # chat area (messages, input, thinking indicator)
+        │   ├── sidebar.gleam       # activity bar + panel container
+        │   ├── goal.gleam          # goal panel
+        │   ├── system_prompt.gleam # system prompt panel
+        │   ├── file_explorer.gleam # file explorer panel
+        │   ├── task.gleam          # task list panel
+        │   └── token_usage.gleam   # token usage panel
+        └── markdown.gleam          # markdown rendering (port from current JS)
+```
 
-- **Phase 4 (Milestone 1):** `gleam run` → open browser → see agent list → click agent → chat with LLM in web UI
-- **Phase 6:** spawn child agent from parent, observe child state in parent's dashboard
-- **Phase 7:** all widgets interactive in sidebar, activity bar toggles panels, tool calls visible in chat, markdown rendered
+### Frontend model
+
+```gleam
+pub type Model {
+  Model(
+    connection: ConnectionStatus,
+    agents: Dict(String, AgentState),
+    active_agent: Option(String),
+    active_panel: Option(String),
+    chat_input: String,
+    thinking: Bool,
+  )
+}
+
+pub type ConnectionStatus {
+  Connecting
+  Connected
+  Disconnected
+}
+
+pub type AgentState {
+  AgentState(
+    goal: Option(String),
+    system_prompt: String,
+    tasks: Dict(Int, Task),
+    task_order: List(Int),
+    messages: List(ChatMessage),
+    files: ...,
+    directories: ...,
+    token_usage: List(TokenRecord),
+  )
+}
+```
+
+### Frontend dependencies
+
+```toml
+[dependencies]
+lustre = ">= 5.6.0 and < 6.0.0"
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+gleam_json = ">= 3.1.0 and < 4.0.0"
+eddie_shared = { path = "../shared" }
+```
+
+### Backend serves the SPA
+
+`server.gleam` updated:
+- `GET /` serves an HTML shell that loads the compiled Lustre JS
+- Static assets served from a build output directory
+- WebSocket at `/ws` unchanged (already sends JSON events)
+
+### Key files
+- All new files in `frontend/src/`
+- `backend/src/eddie/server.gleam` — serve static frontend
+- Delete `backend/src/eddie/frontend.gleam`
+
+### Verification
+- `cd frontend && gleam build` — compiles to JS
+- `task backend:run` — serves the SPA
+- Manual: full end-to-end test in browser
+- `cd backend && gleam test` — still passes
+
+---
+
+## Phase 5: Multi-agent support and cleanup
+
+**Goal:** Frontend supports viewing/switching between multiple agents. Remove dead code, update docs.
+
+### Frontend changes
+- Agent selector in the UI (tab bar or dropdown)
+- Each agent has its own WebSocket subscription
+- `Model.agents` dict holds per-agent state
+- Switching agents changes `active_agent`, renders that agent's state
+
+### Cleanup
+- Remove `backend/src/eddie/frontend.gleam` (if not already deleted)
+- Update `CLAUDE.md` with new project structure
+- Update `Taskfile.yml` with full monorepo tasks
+- Update mdBook docs
+
+### Verification
+- All tests pass across all three projects
+- End-to-end manual test with multiple agents

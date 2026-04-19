@@ -5,7 +5,7 @@
 /// - A **model** (immutable state)
 /// - **Msgs** (typed events)
 /// - An **update** function: `(model, msg) -> #(model, Cmd(msg))`
-/// - Three **view** functions: messages (for LLM), tools (for LLM), HTML (for browser)
+/// - Three **view** functions: messages (for LLM), tools (for LLM), state (for frontend)
 /// - Two **anticorruption layers**: from_llm and from_ui convert external
 ///   events into typed Msgs
 ///
@@ -16,12 +16,12 @@ import gleam/bool
 import gleam/dynamic.{type Dynamic}
 import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
-import lustre/element.{type Element}
 
 import eddie/cmd.{type Cmd, CmdEffect, CmdNone, CmdToolResult}
 import eddie/coerce
 import eddie/tool.{type ToolDefinition}
 import eddie_shared/message.{type Message}
+import eddie_shared/protocol.{type ServerEvent}
 
 /// Configuration for creating a widget. All functions are required except
 /// where defaults make sense (e.g. a widget with no tools).
@@ -32,7 +32,7 @@ pub type WidgetConfig(model, msg) {
     update: fn(model, msg) -> #(model, Cmd(msg)),
     view_messages: fn(model) -> List(Message),
     view_tools: fn(model) -> List(ToolDefinition),
-    view_html: fn(model) -> Element(Nil),
+    view_state: fn(model) -> List(ServerEvent),
     from_llm: fn(model, String, Dynamic) -> Result(msg, String),
     from_ui: fn(model, String, Dynamic) -> Option(msg),
     frontend_tools: Set(String),
@@ -56,7 +56,7 @@ pub opaque type WidgetHandle {
     id: String,
     view_messages_fn: fn() -> List(Message),
     view_tools_fn: fn() -> List(ToolDefinition),
-    view_html_fn: fn() -> Element(Nil),
+    view_state_fn: fn() -> List(ServerEvent),
     dispatch_llm_fn: fn(String, Dynamic) ->
       #(WidgetHandle, Result(String, String)),
     dispatch_ui_fn: fn(String, Dynamic) -> #(WidgetHandle, Option(String)),
@@ -85,9 +85,9 @@ pub fn view_tools(handle: WidgetHandle) -> List(ToolDefinition) {
   { handle.view_tools_fn }()
 }
 
-/// Produce the HTML element for the browser dashboard.
-pub fn view_html(handle: WidgetHandle) -> Element(Nil) {
-  { handle.view_html_fn }()
+/// Produce the list of domain events representing this widget's current state.
+pub fn view_state(handle: WidgetHandle) -> List(ServerEvent) {
+  { handle.view_state_fn }()
 }
 
 /// Tool names that can be called from the browser frontend.
@@ -143,7 +143,7 @@ type WidgetFns(model, msg) {
     update: fn(model, msg) -> #(model, Cmd(msg)),
     view_messages: fn(model) -> List(Message),
     view_tools: fn(model) -> List(ToolDefinition),
-    view_html: fn(model) -> Element(Nil),
+    view_state: fn(model) -> List(ServerEvent),
     from_llm: fn(model, String, Dynamic) -> Result(msg, String),
     from_ui: fn(model, String, Dynamic) -> Option(msg),
     frontend_tools: Set(String),
@@ -165,7 +165,7 @@ pub fn create(config: WidgetConfig(model, msg)) -> WidgetHandle {
       update: config.update,
       view_messages: config.view_messages,
       view_tools: config.view_tools,
-      view_html: config.view_html,
+      view_state: config.view_state,
       from_llm: config.from_llm,
       from_ui: config.from_ui,
       frontend_tools: config.frontend_tools,
@@ -183,7 +183,7 @@ fn build_handle(
     id: fns.id,
     view_messages_fn: fn() { { fns.view_messages }(model) },
     view_tools_fn: fn() { { fns.view_tools }(model) },
-    view_html_fn: fn() { { fns.view_html }(model) },
+    view_state_fn: fn() { { fns.view_state }(model) },
     dispatch_llm_fn: fn(tool_name, args) {
       do_dispatch_llm(fns: fns, model: model, tool_name: tool_name, args: args)
     },

@@ -30,8 +30,7 @@ import eddie/widgets/goal as eddie_goal
 import eddie/widgets/system_prompt as eddie_system_prompt
 import eddie/widgets/token_usage as eddie_token_usage
 import eddie_shared/message.{type Message}
-
-import lustre/element
+import eddie_shared/protocol
 
 /// Configuration for creating an agent.
 pub type AgentConfig {
@@ -74,7 +73,7 @@ pub type TurnResult {
 pub opaque type AgentMessage {
   RunTurn(text: String, reply_to: Subject(TurnResult))
   GetState(reply_to: Subject(Context))
-  GetCurrentHtml(reply_to: Subject(String))
+  GetCurrentState(reply_to: Subject(String))
   Subscribe(subscriber: Subject(String))
   Unsubscribe(subscriber: Subject(String))
   DispatchEvent(event_name: String, args_json: String)
@@ -147,13 +146,13 @@ pub fn get_state(
   })
 }
 
-/// Get the current HTML for all widgets as a single OOB-swap payload.
-pub fn get_current_html(
+/// Get the current state events for all widgets as a JSON string.
+pub fn get_current_state(
   subject subject: Subject(AgentMessage),
   timeout timeout: Int,
 ) -> String {
   process.call(subject, waiting: timeout, sending: fn(reply_to) {
-    GetCurrentHtml(reply_to:)
+    GetCurrentState(reply_to:)
   })
 }
 
@@ -200,20 +199,10 @@ fn handle_message(
       process.send(reply_to, state.context)
       actor.continue(state)
     }
-    GetCurrentHtml(reply_to) -> {
-      let entries = context.current_html(context: state.context)
-      let html_payload =
-        list.map(entries, fn(entry) {
-          let #(id, el) = entry
-          let inner_html = element.to_string(el)
-          "<div id=\"widget-"
-          <> id
-          <> "\" data-swap-oob=\"true\">"
-          <> inner_html
-          <> "</div>"
-        })
-        |> string.join("")
-      process.send(reply_to, html_payload)
+    GetCurrentState(reply_to) -> {
+      let events = context.current_state(context: state.context)
+      let payload = protocol.server_events_to_json_string(events)
+      process.send(reply_to, payload)
       actor.continue(state)
     }
     Subscribe(subscriber) -> {
@@ -359,6 +348,7 @@ fn dispatch_tool_calls(
       notify_tool_result(
         state: current_state,
         tool_name: tc.tool_name,
+        tool_call_id: tc.tool_call_id,
         result: result_text,
       )
 
@@ -391,27 +381,17 @@ fn dispatch_tool_calls(
 // Subscriber notification
 // ============================================================================
 
-/// Notify all subscribers of HTML changes between old and new context.
+/// Notify all subscribers of state changes between old and new context.
 fn notify_subscribers(
   state state: AgentState,
   old_context old_context: Context,
 ) -> Nil {
-  let changes = context.changed_html(old: old_context, new: state.context)
-  case changes {
+  let events = context.changed_state(old: old_context, new: state.context)
+  case events {
     [] -> Nil
     _ -> {
-      let html_payload =
-        list.map(changes, fn(change) {
-          let #(id, el) = change
-          let inner_html = element.to_string(el)
-          "<div id=\"widget-"
-          <> id
-          <> "\" data-swap-oob=\"true\">"
-          <> inner_html
-          <> "</div>"
-        })
-        |> string.join("")
-      list.each(state.subscribers, fn(sub) { process.send(sub, html_payload) })
+      let payload = protocol.server_events_to_json_string(events)
+      list.each(state.subscribers, fn(sub) { process.send(sub, payload) })
     }
   }
 }
@@ -421,14 +401,13 @@ fn notify_tool_call(
   state state: AgentState,
   tool_call tool_call: ToolCall,
 ) -> Nil {
-  let payload =
-    json.to_string(
-      json.object([
-        #("type", json.string("tool_call")),
-        #("name", json.string(tool_call.tool_name)),
-        #("args", json.string(tool_call.arguments_json)),
-      ]),
+  let event =
+    protocol.ToolCallStarted(
+      name: tool_call.tool_name,
+      args_json: tool_call.arguments_json,
+      call_id: tool_call.tool_call_id,
     )
+  let payload = protocol.server_events_to_json_string([event])
   list.each(state.subscribers, fn(sub) { process.send(sub, payload) })
 }
 
@@ -436,16 +415,16 @@ fn notify_tool_call(
 fn notify_tool_result(
   state state: AgentState,
   tool_name tool_name: String,
+  tool_call_id tool_call_id: String,
   result result: String,
 ) -> Nil {
-  let payload =
-    json.to_string(
-      json.object([
-        #("type", json.string("tool_result")),
-        #("name", json.string(tool_name)),
-        #("result", json.string(result)),
-      ]),
+  let event =
+    protocol.ToolCallCompleted(
+      name: tool_name,
+      result: result,
+      call_id: tool_call_id,
     )
+  let payload = protocol.server_events_to_json_string([event])
   list.each(state.subscribers, fn(sub) { process.send(sub, payload) })
 }
 

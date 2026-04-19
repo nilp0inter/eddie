@@ -12,10 +12,6 @@
 
 `context.gleam` calls `rebuild_tool_owners` after every state change — every `handle_tool_call`, `add_user_message`, `add_response`, `handle_widget_event`, etc. This scans all widgets' `view_tools` and rebuilds the owner dict from scratch. The cost is proportional to the number of widgets times their tool count, which is small today (2-3 widgets, ~10 tools total) but would scale poorly with many widgets. If performance becomes an issue, the rebuild could be made lazy (only on `view_tools` or `handle_tool_call`) or incremental (track which widget changed and only rescan it).
 
-## `changed_html` uses string comparison
-
-`context.changed_html` renders each widget's HTML to a string via `element.to_string` and compares strings to detect changes. This is correct but wasteful — it serialises the entire element tree even when only a small part changed. A structural diff on the Lustre element tree would be more efficient but significantly more complex. This is acceptable for now since `changed_html` is called at most once per state mutation during a turn, not in a tight loop.
-
 ## Agent turn loop blocks the actor mailbox
 
 The agent actor processes `RunTurn` synchronously — while a turn is in progress (which involves multiple HTTP round-trips to the LLM), all other messages (`GetState`, `Subscribe`, `Unsubscribe`, `DispatchEvent`) are queued. This means a subscriber registering during a turn won't receive updates until the turn completes, and `GetState` calls will block until the turn finishes. For single-user Milestone 1 this is acceptable because `Subscribe` is called at WebSocket init (before any turn), and `GetState` is not used in the hot path. With multi-agent support now in place (Phase 6), this becomes more pressing — child agents querying the parent or vice versa will block on a running turn. The turn could be offloaded to a spawned child process that sends state diffs back to the actor, keeping the mailbox responsive.
@@ -64,18 +60,7 @@ After sending usage data to the token_usage widget, `record_token_usage` creates
 
 The file explorer's `open_directory` and `read_file` tools accept arbitrary paths from the LLM with no sandboxing or path traversal protection. The LLM can read any file the BEAM process has access to, including `..` paths, symlink targets, and sensitive configuration. For a single-user local agent this matches the trust model (the LLM acts on behalf of the user), but for any multi-user or exposed deployment, a path allowlist or chroot-like restriction would be essential.
 
-## Inline HTML frontend exceeds natural size for a string literal
+## Token usage state change invisible to subscribers
 
-The `index_html()` function in `server.gleam` now contains ~200 lines of HTML/CSS and ~150 lines of JavaScript. This exceeds the threshold identified in [trade-off card 05](./tradeoffs/05-inline-html-over-lustre-spa.md) as a reconsideration trigger. Editing the frontend requires escaping quotes, there is no syntax highlighting, and no hot-reload. The frontend is functionally complete (activity bar, interactive widgets, markdown rendering, tool call display), making a migration to Lustre SPA or separate HTML files a reasonable next step if further frontend complexity is added. For now, the inline approach still works because the JS is straightforward DOM manipulation with no component state management.
+In `agent.gleam`, `record_token_usage` updates the context before `old_ctx` is captured for the subsequent `notify_subscribers` call. This means the token usage widget's state change is included in both old and new context snapshots, so `changed_state` never detects it. Token usage updates only become visible when another widget's state changes in the same notification cycle (e.g., the conversation log). The fix would be to capture `old_ctx` before `record_token_usage`, but this changes the notification semantics for all widgets in that cycle.
 
-## Minimal client-side markdown renderer
-
-The `renderMarkdown()` function in `server.gleam` is a ~15-line regex-based parser handling fenced code blocks, inline code, bold, italic, headers, and lists. It does not handle nested formatting, block quotes, tables, horizontal rules, or escaped characters. For LLM output this is usually sufficient, but edge cases (nested bold inside code, multi-paragraph list items) will render incorrectly. Replacing with a proper library (e.g., marked.js) would fix these but adds an external dependency to a currently zero-dependency frontend.
-
-## Token usage HTML change invisible to subscribers
-
-In `agent.gleam`, `record_token_usage` updates the context before `old_ctx` is captured for the subsequent `notify_subscribers` call. This means the token usage widget's HTML change is included in both old and new context snapshots, so `changed_html` never detects it. Token usage updates only become visible when another widget's HTML changes in the same notification cycle (e.g., the conversation log). The fix would be to capture `old_ctx` before `record_token_usage`, but this changes the notification semantics for all widgets in that cycle.
-
-## Inline JS event handlers in widget `view_html`
-
-All interactive widgets generate inline `onclick`/`onkeydown`/`ondblclick` attributes with `sendWidgetEvent(...)` calls embedded as string literals. This works but has no compile-time safety — a typo in an event name or argument key is caught only at runtime. The file explorer uses an `escape_js` helper to prevent injection from file paths, but there is no systematic escaping strategy for other widgets. If widget interactivity grows more complex, a structured approach (e.g., data attributes with a single delegated event listener) would be more maintainable.

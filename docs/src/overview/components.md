@@ -12,14 +12,14 @@ OTP actor that owns the agent state and runs the LLM turn loop. The actor proces
 - **`AgentMessage`** — opaque message type with six variants:
   - `RunTurn(text, reply_to)` — user message triggers a full turn loop
   - `GetState(reply_to)` — return current Context for inspection
-  - `GetCurrentHtml(reply_to)` — return current widget HTML as an OOB-swap payload string
-  - `Subscribe(subscriber)` / `Unsubscribe(subscriber)` — register/unregister for HTML update notifications
+  - `GetCurrentState(reply_to)` — return current widget state as a JSON-encoded `ServerEvent` list
+  - `Subscribe(subscriber)` / `Unsubscribe(subscriber)` — register/unregister for state update notifications
   - `DispatchEvent(event_name, args_json)` — forward browser widget events
 - **`TurnResult`** — `TurnSuccess(text)` | `TurnError(reason)`
 - **`start(config)`** — creates a Context with default widgets, starts the actor, returns `Result(Subject(AgentMessage), StartError)`
 - **`start_with_send_fn(config, send_fn)`** — same but with an injectable HTTP sender for testing
 - **`run_turn(subject, text, timeout)`** — convenience wrapper around `process.call`
-- **`get_current_html(subject, timeout)`** — returns the current widget HTML as a single OOB-swap payload string (used to populate widget panels on initial WebSocket connection)
+- **`get_current_state(subject, timeout)`** — returns the current widget state as a JSON-encoded `ServerEvent` list (used to populate the frontend on initial WebSocket connection)
 
 **Turn loop internals:**
 
@@ -36,13 +36,13 @@ The recursive turn loop (`turn_loop → do_turn_step → handle_llm_response →
 
 **Subscriber notification:**
 
-After each state mutation (user message added, response recorded, tool calls dispatched, tool results recorded), the agent computes `context.changed_html(old, new)` and wraps each changed widget's HTML in a `<div id="widget-{id}" data-swap-oob="true">` envelope. The concatenated HTML string is sent to all subscriber Subjects. This is a fire-and-forget push — subscribers are WebSocket handler processes that forward the HTML to the browser.
+After each state mutation (user message added, response recorded, tool calls dispatched, tool results recorded), the agent computes `context.changed_state(old, new)` — which compares each widget's `view_state` output using structural equality — and sends the resulting `ServerEvent` list as a JSON-encoded string to all subscriber Subjects. This is a fire-and-forget push — subscribers are WebSocket handler processes that forward the JSON to the browser.
 
-During tool dispatch, the agent also sends tool call progress notifications as JSON to subscribers. Each tool call sends a `{"type": "tool_call", "name": "...", "args": "..."}` message before dispatch and a `{"type": "tool_result", "name": "...", "result": "..."}` message after dispatch. The browser renders these as collapsible detail blocks in the chat stream, giving visibility into the agent's actions during a turn.
+During tool dispatch, the agent sends `ToolCallStarted` and `ToolCallCompleted` `ServerEvent`s to subscribers, giving visibility into the agent's actions during a turn. All notifications use the same JSON-encoded `ServerEvent` list format defined in `eddie_shared/protocol`.
 
 ### `eddie/server` and `eddie/frontend`
 
-Mist HTTP and WebSocket server (`server.gleam`) plus the browser UI template (`frontend.gleam`). The server is thin glue between the browser and the agent actor; the frontend module holds the self-contained HTML page.
+Mist HTTP and WebSocket server (`server.gleam`) plus a minimal browser frontend (`frontend.gleam`). The server is thin glue between the browser and the agent actor; the frontend module holds a temporary event-logging page that displays raw JSON domain events (a Lustre SPA is planned for Phase 4).
 
 - **`ServerConfig(port)`** — listening port configuration
 - **`start(config, agent)`** — starts mist, returns `Result(Started(Supervisor), StartError)`
@@ -51,13 +51,13 @@ Mist HTTP and WebSocket server (`server.gleam`) plus the browser UI template (`f
 
 | Method | Path | Behaviour |
 |---|---|---|
-| `GET` | `/` | Serves the inline HTML frontend |
+| `GET` | `/` | Serves the event-logging frontend |
 | `GET` | `/ws` | WebSocket upgrade |
 | `*` | `*` | 404 |
 
 **WebSocket protocol:**
 
-Each WebSocket connection is a separate BEAM process. On init, it creates two Subjects — one for HTML updates (`Subject(String)`), one for turn results (`Subject(TurnResult)`) — and builds a Selector that maps both to internal `WsCustomMessage` variants. The connection subscribes to the agent for HTML updates, then immediately sends the current widget HTML via `agent.get_current_html` so that all widget panels are populated on first load (without this, panels would remain empty until the first state mutation).
+Each WebSocket connection is a separate BEAM process. On init, it creates two Subjects — one for state updates (`Subject(String)`), one for turn results (`Subject(TurnResult)`) — and builds a Selector that maps both to internal `WsCustomMessage` variants. The connection subscribes to the agent for state updates, then immediately sends the current widget state via `agent.get_current_state` so that the frontend is populated on first load (without this, the frontend would remain empty until the first state mutation).
 
 *Client → Server messages (JSON over WebSocket):*
 
@@ -68,24 +68,25 @@ Each WebSocket connection is a separate BEAM process. On init, it creates two Su
 
 *Server → Client messages:*
 
-| Type | Payload | Purpose |
-|---|---|---|
-| HTML fragments | Raw HTML with `data-swap-oob` divs | Widget state changes (pushed by agent subscriber) |
-| `turn_start` | `{"type": "turn_start"}` | Enables thinking indicator in the browser |
-| `turn_end` | `{"type": "turn_end", "success": bool, "text": "...", "error": "..."}` | Disables thinking indicator, displays response |
-| `tool_call` | `{"type": "tool_call", "name": "...", "args": "..."}` | Shows tool call in chat as collapsible block |
-| `tool_result` | `{"type": "tool_result", "name": "...", "result": "..."}` | Shows tool result in chat with distinct styling |
+All server-to-client messages are JSON-encoded arrays of `ServerEvent` objects (defined in `eddie_shared/protocol`). Each event has a `"type"` field identifying the variant. Key event types:
+
+| Event type | Purpose |
+|---|---|
+| `system_prompt_updated` | System prompt text changed |
+| `goal_updated` | Goal set or cleared |
+| `tokens_used` | Token usage for a request |
+| `file_explorer_updated` | Open directories and files changed |
+| `task_created`, `task_status_changed` | Task lifecycle events |
+| `conversation_appended` | New log item (user message, response, tool results) |
+| `tool_call_started`, `tool_call_completed` | Tool call progress during a turn |
+| `turn_started`, `turn_completed` | Turn lifecycle (thinking indicator) |
+| `agent_error` | Unrecoverable agent error |
 
 **Frontend template (`eddie/frontend`):**
 
-The `frontend.index_html()` function returns a self-contained HTML page with embedded CSS and ~150 lines of JavaScript. The layout uses a VS Code-style activity bar (48px icon strip) with a collapsible side panel (320px) and main chat area. Features:
+The `frontend.index_html()` function returns a minimal event-logging page. It connects via WebSocket, parses incoming JSON `ServerEvent` arrays, and displays each event with its type tag in a scrollable log. A text input allows sending user messages. This is a temporary stub — the full UI will be a Lustre SPA (Phase 4).
 
-- **Activity bar** — icon buttons for each widget (System Prompt, Goal, File Explorer, Tasks, Token Usage) with notification badges for updates to inactive panels
-- **Side panel** — displays one widget at a time, toggled by activity bar clicks
-- **Chat area** — Catppuccin-themed message bubbles with markdown rendering for assistant responses, tool call/result display as collapsible blocks, thinking indicator during turns
-- **WebSocket** — auto-reconnect, `sendWidgetEvent(name, args)` function for widget interactivity, manual DOM swap for OOB-tagged fragments
-
-No build step, no external dependencies. See [trade-off card](../decisions/tradeoffs/05-inline-html-over-lustre-spa.md) for rationale and costs.
+No build step, no external dependencies.
 
 ### `eddie` (entry point)
 
@@ -121,7 +122,7 @@ Identity and framing text for the agent. The simplest widget — holds a single 
 - **Messages:** `SetSystemPrompt(text)` | `ResetSystemPrompt`
 - **LLM tools:** none — UI-only widget
 - **Frontend events:** `set_system_prompt` (carries `{text: "..."}`) and `reset_system_prompt`
-- **Views:** `view_html` renders a textarea with the current prompt text, a Save button (`sendWidgetEvent('set_system_prompt', ...)`) and a Reset button (`sendWidgetEvent('reset_system_prompt', {})`)
+- **`view_state`:** `[SystemPromptUpdated(text: model.text)]`
 - **Factory:** `create(text:)` or `create_default()` (default text establishes the Eddie identity and workflow instructions)
 
 The update function is trivial: `SetSystemPrompt` replaces the text, `ResetSystemPrompt` reverts to the default. Both return `CmdNone` since there's no LLM to respond to.
@@ -185,13 +186,7 @@ Log items are walked in chronological order, grouped by consecutive `owning_task
 
 An "Open tasks" block listing pending and in-progress tasks is appended at the end.
 
-**`view_html`** renders a full task management panel:
-- A create-task input (Enter key triggers `sendWidgetEvent('create_task', ...)`)
-- A message count indicator
-- Pending tasks with Start and Remove buttons
-- In-progress task banner with memory list, add-memory input, and Close Task button (disabled until at least one memory exists)
-- Done tasks as collapsible `<details>` elements with `ontoggle` → `sendWidgetEvent('toggle_task_expanded', ...)`
-- Memory items with numbered display and remove buttons
+**`view_state`** produces `TaskCreated` events for each task and `ConversationAppended` events for each log item (as `LogItemSnapshot` variants: `UserMessageSnapshot`, `ResponseSnapshot`, `ToolResultsSnapshot`).
 
 **Factory:** `create()` — returns a `WidgetHandle` with an empty model. For Context's use, `init()` returns a typed `ConversationLog` opaque type with direct dispatch, protocol checking, and owning task ID access (see [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md)).
 
@@ -203,7 +198,7 @@ Protocol-free goal tracking. Both the LLM and the browser can set or clear the g
 - **Messages:** `SetGoal(goal, initiator)` | `ClearGoal(initiator)` — both carry `Initiator` to determine whether to return a tool result
 - **LLM tools:** `set_goal` (string `goal` parameter) and `clear_goal` (no parameters) — both protocol-free
 - **Frontend events:** `set_goal` and `clear_goal`
-- **Views:** `view_messages` yields a `UserPart` with `## Goal\n{text}` or `## Goal\nNo goal set`; `view_html` renders a heading, content display, input field with Enter-key handler (`sendWidgetEvent('set_goal', ...)`), Set button, and Clear button (`sendWidgetEvent('clear_goal', {})`)
+- **Views:** `view_messages` yields a `UserPart` with `## Goal\n{text}` or `## Goal\nNo goal set`; `view_state` produces `[GoalUpdated(text: model.text)]`
 - **Factory:** `create(text:)` with `Option(String)`, or `create_default()` for no initial goal
 
 ### `eddie/widgets/file_explorer` (Phase 6)
@@ -217,7 +212,7 @@ Filesystem navigation using `CmdEffect` for IO operations. All tools are protoco
   - Close: `CloseDirectory(path, initiator)`, `CloseReadFile(path, initiator)`
 - **LLM tools:** `open_directory` (path defaults to `"."`), `close_directory`, `read_file`, `close_read_file` — all protocol-free
 - **Frontend events:** same four tool names
-- **Views:** `view_messages` yields a markdown listing of open directories and file contents; `view_html` renders a Root button (`sendWidgetEvent('open_directory', {path: '.'})`), directory listings with double-click navigation (`ondblclick` → `sendWidgetEvent('open_directory'/'read_file', ...)`), close buttons for directories and files, and file content in `<pre>` blocks. An `escape_js` helper sanitises file paths for safe embedding in inline JS handlers
+- **Views:** `view_messages` yields a markdown listing of open directories and file contents; `view_state` produces `[FileExplorerUpdated(directories: [...], files: [...])]` with `DirectorySnapshot` and `FileSnapshot` protocol types
 - **IO pattern:** `CmdEffect(perform: fn() { coerce.unsafe_coerce(do_open_directory(path)) }, to_msg: coerce.unsafe_coerce)` — the perform closure runs the real IO, returns a `FileExplorerMsg` coerced to `Dynamic`, and `to_msg` coerces it back. Re-opening the same path refreshes the listing
 - **Factory:** `create()`
 
@@ -227,7 +222,7 @@ Display-only token tracking. No LLM tools or messages — receives data via `wid
 
 - **Model:** `TokenUsageModel(records: List(TokenRecord))` — records stored reversed (prepend), reversed for display. `TokenRecord(request_number, input_tokens, output_tokens)`
 - **Messages:** `UsageRecorded(input_tokens, output_tokens)` — a single message variant
-- **Views:** `view_messages` returns `[]`, `view_tools` returns `[]`; `view_html` renders a summary line (request count, total input/output with K/M formatting), an SVG stacked bar chart (blue for input tokens, orange for output, last 20 requests) with native browser tooltips via `<title>` elements, and a colour legend
+- **Views:** `view_messages` returns `[]`, `view_tools` returns `[]`; `view_state` produces `[TokensUsed(input, output)]` for each record in chronological order
 - **Integration:** the agent's `record_token_usage` function finds the token_usage widget by ID in the children list and sends a `UsageRecorded` message via `widget.send` after each parsed LLM response
 - **Factory:** `create()`
 
@@ -273,8 +268,8 @@ The root compositor — the glue between widgets and the agent loop. Holds a sys
 - **`consume_picks`** — clears one-shot task expansions after a request/response round-trip
 - **`handle_tool_call(context, tool_name, args, tool_call_id)`** — enforces the task protocol via `conversation_log.protocol_check`, then routes to the owning widget. Returns `#(Context, Result(String, String))`
 - **`handle_widget_event`** — dispatches browser UI events to all widgets (no protocol enforcement)
-- **`current_html(context)`** — returns the current HTML for all widgets as `List(#(String, Element(Nil)))` (used for initial page load)
-- **`changed_html(old, new)`** — detects which widgets' HTML changed between two snapshots
+- **`current_state(context)`** — returns the current state events for all widgets as a flat `List(ServerEvent)` (used for initial WebSocket connect)
+- **`changed_state(old, new)`** — compares each widget's `view_state` output using structural equality, returns events from widgets whose state differs
 
 The conversation log is stored as a typed `ConversationLog` (not a `WidgetHandle`) so Context can access protocol checking and the owning task ID directly. See [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md) for the rationale.
 
@@ -338,7 +333,7 @@ The central abstraction. Defines both the typed configuration and the type-erase
 - `update: fn(model, msg) -> #(model, Cmd(msg))`
 - `view_messages: fn(model) -> List(Message)`
 - `view_tools: fn(model) -> List(ToolDefinition)`
-- `view_html: fn(model) -> Element(Nil)`
+- `view_state: fn(model) -> List(ServerEvent)`
 - `from_llm: fn(model, String, Dynamic) -> Result(msg, String)` — anticorruption layer for LLM tool calls
 - `from_ui: fn(model, String, Dynamic) -> Option(msg)` — anticorruption layer for browser events
 - `frontend_tools: Set(String)` — tool names callable from the browser
@@ -348,7 +343,7 @@ The central abstraction. Defines both the typed configuration and the type-erase
 - `dispatch_llm(handle, tool_name, args)` — runs from_llm -> update -> Cmd loop
 - `dispatch_ui(handle, event_name, args)` — checks frontend_tools, runs from_ui -> update -> Cmd loop
 - `send(handle, msg)` — direct dispatch, must produce CmdNone
-- `view_messages`, `view_tools`, `view_html` — produce widget output
+- `view_messages`, `view_tools`, `view_state` — produce widget output
 
 The Cmd loop executes `CmdEffect` synchronously within the closure. This is safe because BEAM processes are lightweight and the agent GenServer (Phase 4) will own the execution context.
 

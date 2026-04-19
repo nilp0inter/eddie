@@ -4,27 +4,40 @@ Run `task --list` to see all available tasks. Key commands:
 
 | Command | Purpose |
 |---|---|
-| `task build:local` | Build the project |
-| `task format` | Auto-format source files |
-| `task format:check` | Check formatting (CI) |
+| `task build:local` | Build all packages (shared, backend, frontend) |
+| `task backend:run` | Build and run the backend server |
+| `task test:unit` | Run all tests (shared + backend) |
+| `task format` | Auto-format all packages |
+| `task format:check` | Check formatting across all packages (CI) |
 | `task lint` | Format check + glinter |
-| `task tests:unit` | Run all tests |
 | `task docs:build` | Build documentation |
 | `task docs:serve` | Serve docs with live reload |
+
+Per-component commands follow a `component:target` pattern:
+
+| Command | Purpose |
+|---|---|
+| `task shared:build` | Build the shared package |
+| `task shared:test:unit` | Run shared tests |
+| `task backend:build` | Build the backend |
+| `task backend:test:unit` | Run backend tests |
+| `task backend:lint` | Format check + glinter for backend |
+| `task backend:run` | Build and run the backend server |
+| `task frontend:build` | Build the frontend |
 
 ## Local workflow
 
 The correct order for local development:
 
-1. `gleam test` — run tests, fix until green
-2. `gleam run -m glinter` — run linter, fix warnings
-3. `gleam format src/ test/` — format only once, at the end
+1. `task test:unit` — run tests, fix until green
+2. `task backend:lint` — run linter, fix warnings
+3. `task format` — format only once, at the end
 
-Never format before tests and lint pass. Always scope format to `src/` and `test/` to avoid touching `reference/` or other directories.
+Never format before tests and lint pass.
 
 ## Lint
 
-The `task lint` command runs two checks in sequence:
+The `task backend:lint` command runs two checks in sequence:
 
 1. `gleam format --check` — verifies formatting without modifying files
 2. `gleam run -m glinter` — runs the glinter static analysis tool

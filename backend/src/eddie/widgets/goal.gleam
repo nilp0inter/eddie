@@ -7,15 +7,13 @@ import gleam/dynamic/decode
 import gleam/json
 import gleam/option.{type Option, None, Some}
 import gleam/set
-import lustre/attribute
-import lustre/element.{type Element}
-import lustre/element/html
 
 import eddie/cmd.{type Cmd}
 import eddie/tool.{type ToolDefinition}
 import eddie/widget.{type WidgetHandle}
 import eddie_shared/initiator.{type Initiator, LLM, UI}
 import eddie_shared/message.{type Message}
+import eddie_shared/protocol.{type ServerEvent}
 
 // ============================================================================
 // Model
@@ -101,38 +99,8 @@ fn view_tools(_model: GoalModel) -> List(ToolDefinition) {
   [set_goal_tool, clear_goal_tool]
 }
 
-fn view_html(model: GoalModel) -> Element(Nil) {
-  let content = case model.text {
-    None -> html.em([], [html.text("No goal set")])
-    Some(goal) -> html.p([], [html.text(goal)])
-  }
-  html.div([], [
-    html.h3([], [html.text("Goal")]),
-    content,
-    html.input([
-      attribute.id("goal-input"),
-      attribute.attribute("placeholder", "Set a goal..."),
-      attribute.attribute(
-        "onkeydown",
-        "if(event.key==='Enter'){sendWidgetEvent('set_goal',{goal:this.value});this.value='';}",
-      ),
-    ]),
-    html.button(
-      [
-        attribute.attribute(
-          "onclick",
-          "sendWidgetEvent('set_goal', {goal: document.getElementById('goal-input').value})",
-        ),
-      ],
-      [html.text("Set")],
-    ),
-    html.button(
-      [
-        attribute.attribute("onclick", "sendWidgetEvent('clear_goal', {})"),
-      ],
-      [html.text("Clear")],
-    ),
-  ])
+fn view_state(model: GoalModel) -> List(ServerEvent) {
+  [protocol.GoalUpdated(text: model.text)]
 }
 
 // ============================================================================
@@ -187,7 +155,7 @@ pub fn create(text text: Option(String)) -> WidgetHandle {
     update: update,
     view_messages: view_messages,
     view_tools: view_tools,
-    view_html: view_html,
+    view_state: view_state,
     from_llm: from_llm,
     from_ui: from_ui,
     frontend_tools: set.from_list(["set_goal", "clear_goal"]),

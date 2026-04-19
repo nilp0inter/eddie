@@ -17,12 +17,12 @@ import gleam/dynamic.{type Dynamic}
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/set.{type Set}
-import lustre/element.{type Element}
 
 import eddie/tool.{type ToolDefinition}
 import eddie/widget.{type WidgetHandle}
 import eddie/widgets/conversation_log.{type ConversationLog}
 import eddie_shared/message.{type Message}
+import eddie_shared/protocol.{type ServerEvent}
 
 /// The root context compositor.
 pub opaque type Context {
@@ -190,27 +190,24 @@ pub fn handle_widget_event(
   )
 }
 
-/// Detect which widgets changed their HTML between two context snapshots.
-/// Returns a list of (widget_id, new_html) pairs for widgets whose HTML differs.
-/// Get the current HTML for all widgets (used for initial page load).
-pub fn current_html(context context: Context) -> List(#(String, Element(Nil))) {
-  all_widget_html_entries(context)
-  |> list.map(fn(entry) { #(entry.id, entry.element) })
+/// Get the current state events for all widgets (used for initial WebSocket connect).
+pub fn current_state(context context: Context) -> List(ServerEvent) {
+  all_widget_state_entries(context)
+  |> list.flat_map(fn(entry) { entry.events })
 }
 
-pub fn changed_html(
-  old old: Context,
-  new new: Context,
-) -> List(#(String, Element(Nil))) {
-  let old_entries = all_widget_html_entries(old)
-  let new_entries = all_widget_html_entries(new)
+/// Detect which widgets changed their state between two context snapshots.
+/// Returns events from widgets whose state differs.
+pub fn changed_state(old old: Context, new new: Context) -> List(ServerEvent) {
+  let old_entries = all_widget_state_entries(old)
+  let new_entries = all_widget_state_entries(new)
 
   list.zip(old_entries, new_entries)
-  |> list.filter_map(fn(pair) {
+  |> list.flat_map(fn(pair) {
     let #(old_entry, new_entry) = pair
-    case old_entry.html_string == new_entry.html_string {
-      True -> Error(Nil)
-      False -> Ok(#(new_entry.id, new_entry.element))
+    case old_entry.events == new_entry.events {
+      True -> []
+      False -> new_entry.events
     }
   })
 }
@@ -234,37 +231,28 @@ pub fn log(context context: Context) -> ConversationLog {
 // Internal helpers
 // ============================================================================
 
-/// Internal record for tracking widget HTML and its string representation.
-type HtmlEntry {
-  HtmlEntry(id: String, element: Element(Nil), html_string: String)
+/// Internal record for tracking widget state events.
+type StateEntry {
+  StateEntry(id: String, events: List(ServerEvent))
 }
 
-/// Collect HTML entries for all widgets in order.
-fn all_widget_html_entries(context: Context) -> List(HtmlEntry) {
-  let sp_element = widget.view_html(context.system_prompt)
+/// Collect state entries for all widgets in order.
+fn all_widget_state_entries(context: Context) -> List(StateEntry) {
   let sp_entry =
-    HtmlEntry(
+    StateEntry(
       id: widget.id(context.system_prompt),
-      element: sp_element,
-      html_string: element.to_string(sp_element),
+      events: widget.view_state(context.system_prompt),
     )
 
   let child_entries =
     list.map(context.children, fn(child) {
-      let child_element = widget.view_html(child)
-      HtmlEntry(
-        id: widget.id(child),
-        element: child_element,
-        html_string: element.to_string(child_element),
-      )
+      StateEntry(id: widget.id(child), events: widget.view_state(child))
     })
 
-  let log_element = conversation_log.typed_view_html(log: context.log)
   let log_entry =
-    HtmlEntry(
+    StateEntry(
       id: "conversation_log",
-      element: log_element,
-      html_string: element.to_string(log_element),
+      events: conversation_log.typed_view_state(log: context.log),
     )
 
   [sp_entry]

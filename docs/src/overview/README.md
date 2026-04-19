@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Eddie is a Gleam reimplementation of Calipso — an Elm-architecture widget system that builds shared context between a user and an AI agent. Each widget has a model, typed messages, a pure update function, and three views: LLM messages, LLM tools, and browser HTML.
+Eddie is a Gleam reimplementation of Calipso — an Elm-architecture widget system that builds shared context between a user and an AI agent. Each widget has a model, typed messages, a pure update function, and three views: LLM messages, LLM tools, and domain state events (for the frontend).
 
 ## How it works
 
@@ -15,7 +15,7 @@ flowchart TB
     Agent <--> Context["Context Compositor"]
     Context <--> Widgets["Widget Tree"]
     Agent -->|http.send| LLM["LLM API"]
-    Agent -.->|HTML fragments| Server
+    Agent -.->|JSON events| Server
 ```
 
 The **agent loop** is the core cycle:
@@ -27,20 +27,20 @@ The **agent loop** is the core cycle:
 5. If the response contains tool calls, dispatch each to its owning widget via the Context compositor
 6. Record tool results in the conversation log, then loop back to step 4
 7. When the LLM responds with text only, the turn completes and the result is sent back over WebSocket
-8. After every state mutation, the agent computes `changed_html` and pushes HTML fragments to all subscribed WebSocket connections
+8. After every state mutation, the agent computes `changed_state` and pushes JSON-encoded `ServerEvent` lists to all subscribed WebSocket connections
 
 ## Key differences from Calipso
 
 | Aspect | Calipso (Python) | Eddie (Gleam) |
 |---|---|---|
 | Agent model | Mono-agent asyncio | OTP actor (single-threaded, message-based) |
-| Frontend | htmx SPA (no build step) | VS Code-style activity bar + inline HTML/JS over WebSocket (no build step) |
-| Widget HTML | Plain HTML strings with htmx OOB swaps | Lustre element types, serialised with `data-swap-oob` for manual DOM swap |
+| Frontend | htmx SPA (no build step) | Minimal event-logging stub (Lustre SPA planned for Phase 4) |
+| Widget output | Plain HTML strings with htmx OOB swaps | `List(ServerEvent)` domain events, JSON-encoded over WebSocket |
 | LLM client | Pydantic AI | glopenai (sans-IO) + gleam_httpc |
 | Structured output | Pydantic AI built-in | Custom layer using sextant (Phase 5) |
 | State mutation | Mutable models (in-place) | Immutable models (update returns new value) |
 | Type erasure | Python `Any` + duck typing | Opaque type with closures over typed internals |
-| Update push | `on_update` callback | Subscriber `Subject(String)` pattern |
+| Update push | `on_update` callback | Subscriber `Subject(String)` pattern (JSON-encoded `ServerEvent` lists) |
 
 ## Widget tree
 

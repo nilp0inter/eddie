@@ -14,6 +14,8 @@ import gleam/otp/static_supervisor.{type Supervisor}
 
 import eddie/agent.{type AgentMessage, type TurnResult}
 import eddie/frontend
+import eddie_shared/protocol
+import eddie_shared/turn_result as shared_turn_result
 import mist
 
 /// Configuration for the web server.
@@ -66,7 +68,7 @@ fn not_found() -> response.Response(mist.ResponseData) {
 
 /// Custom messages the WebSocket process receives from other processes.
 type WsCustomMessage {
-  HtmlUpdate(payload: String)
+  StateUpdate(payload: String)
   TurnComplete(result: TurnResult)
 }
 
@@ -104,7 +106,7 @@ fn ws_init(
   // Build a selector that maps both subjects to WsCustomMessage
   let selector =
     process.new_selector()
-    |> process.select_map(update_subject, fn(payload) { HtmlUpdate(payload:) })
+    |> process.select_map(update_subject, fn(payload) { StateUpdate(payload:) })
     |> process.select_map(turn_result_subject, fn(result) {
       TurnComplete(result:)
     })
@@ -112,10 +114,10 @@ fn ws_init(
   // Subscribe to agent updates
   agent.subscribe(subject: agent_subject, subscriber: update_subject)
 
-  // Send initial widget HTML so panels are populated immediately
-  let initial_html =
-    agent.get_current_html(subject: agent_subject, timeout: 5000)
-  let _sent = mist.send_text_frame(conn, initial_html)
+  // Send initial state events so panels are populated immediately
+  let initial_state =
+    agent.get_current_state(subject: agent_subject, timeout: 5000)
+  let _sent = mist.send_text_frame(conn, initial_state)
 
   let state =
     WsState(
@@ -140,7 +142,7 @@ fn handle_ws_message(
       handle_client_message(state: state, text: text, conn: conn)
       mist.continue(state)
     }
-    mist.Custom(HtmlUpdate(payload)) -> {
+    mist.Custom(StateUpdate(payload)) -> {
       // Best-effort send — connection may have closed
       let _sent = mist.send_text_frame(conn, payload)
       mist.continue(state)
@@ -173,7 +175,9 @@ fn handle_client_message(
   case json.parse(text, user_input_decoder) {
     Ok(user_text) -> {
       // Best-effort send of thinking indicator
-      let _sent = mist.send_text_frame(conn, "{\"type\":\"turn_start\"}")
+      let turn_start_payload =
+        protocol.server_events_to_json_string([protocol.TurnStarted])
+      let _sent = mist.send_text_frame(conn, turn_start_payload)
       send_run_turn(
         agent_subject: state.agent,
         text: user_text,
@@ -215,14 +219,10 @@ fn send_run_turn(
 }
 
 fn turn_result_to_json(result: TurnResult) -> String {
-  case result {
-    agent.TurnSuccess(text) ->
-      "{\"type\":\"turn_end\",\"success\":true,\"text\":"
-      <> json.to_string(json.string(text))
-      <> "}"
-    agent.TurnError(reason) ->
-      "{\"type\":\"turn_end\",\"success\":false,\"error\":"
-      <> json.to_string(json.string(reason))
-      <> "}"
+  let shared_result = case result {
+    agent.TurnSuccess(text) -> shared_turn_result.TurnSuccess(text:)
+    agent.TurnError(reason) -> shared_turn_result.TurnError(reason:)
   }
+  let event = protocol.TurnCompleted(result: shared_result)
+  protocol.server_events_to_json_string([event])
 }

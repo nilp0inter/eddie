@@ -2,6 +2,8 @@
 ///
 /// These are pure data types — the protocol rules and enforcement logic
 /// live in the backend.
+import gleam/json
+
 pub type TaskStatus {
   Pending
   InProgress
@@ -41,4 +43,8 @@ pub fn parse_status(s: String) -> Result(TaskStatus, Nil) {
     "done" -> Ok(Done)
     _ -> Error(Nil)
   }
+}
+
+pub fn status_to_json(status: TaskStatus) -> json.Json {
+  json.string(status_to_string(status))
 }

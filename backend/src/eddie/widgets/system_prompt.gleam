@@ -6,14 +6,12 @@ import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/option.{type Option, None, Some}
 import gleam/set
-import lustre/attribute
-import lustre/element.{type Element}
-import lustre/element/html
 
 import eddie/cmd.{type Cmd, CmdNone}
 import eddie/tool.{type ToolDefinition}
 import eddie/widget.{type WidgetHandle}
 import eddie_shared/message.{type Message}
+import eddie_shared/protocol.{type ServerEvent}
 
 // ============================================================================
 // Model
@@ -58,35 +56,8 @@ fn view_tools(_model: SystemPromptModel) -> List(ToolDefinition) {
   []
 }
 
-fn view_html(model: SystemPromptModel) -> Element(Nil) {
-  html.div([], [
-    html.textarea(
-      [
-        attribute.id("sp-textarea"),
-        attribute.attribute("rows", "8"),
-        attribute.style("width", "100%"),
-      ],
-      model.text,
-    ),
-    html.button(
-      [
-        attribute.attribute(
-          "onclick",
-          "sendWidgetEvent('set_system_prompt', {text: document.getElementById('sp-textarea').value})",
-        ),
-      ],
-      [html.text("Save")],
-    ),
-    html.button(
-      [
-        attribute.attribute(
-          "onclick",
-          "sendWidgetEvent('reset_system_prompt', {})",
-        ),
-      ],
-      [html.text("Reset")],
-    ),
-  ])
+fn view_state(model: SystemPromptModel) -> List(ServerEvent) {
+  [protocol.SystemPromptUpdated(text: model.text)]
 }
 
 // ============================================================================
@@ -131,7 +102,7 @@ pub fn create(text text: String) -> WidgetHandle {
     update: update,
     view_messages: view_messages,
     view_tools: view_tools,
-    view_html: view_html,
+    view_state: view_state,
     from_llm: from_llm,
     from_ui: from_ui,
     frontend_tools: set.from_list(["set_system_prompt", "reset_system_prompt"]),

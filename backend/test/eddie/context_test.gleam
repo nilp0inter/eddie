@@ -6,8 +6,6 @@ import gleam/option.{None, Some}
 import gleam/set
 import gleam/string
 import gleeunit/should
-import lustre/element.{type Element}
-import lustre/element/html
 
 import eddie/cmd
 import eddie/context
@@ -16,6 +14,7 @@ import eddie/widget
 import eddie/widgets/conversation_log
 import eddie/widgets/system_prompt
 import eddie_shared/message
+import eddie_shared/protocol.{type ServerEvent}
 
 // ============================================================================
 // Helpers
@@ -111,8 +110,9 @@ fn counter_view_tools(_model: CounterModel) -> List(tool.ToolDefinition) {
   [td]
 }
 
-fn counter_view_html(model: CounterModel) -> Element(Nil) {
-  html.div([], [html.text("Count: " <> counter_int_to_string(model.count))])
+fn counter_view_state(model: CounterModel) -> List(ServerEvent) {
+  // Use GoalUpdated as a simple way to represent counter state in events
+  [protocol.GoalUpdated(text: Some(counter_int_to_string(model.count)))]
 }
 
 fn counter_from_llm(
@@ -146,7 +146,7 @@ fn create_counter() -> widget.WidgetHandle {
     update: counter_update,
     view_messages: counter_view_messages,
     view_tools: counter_view_tools,
-    view_html: counter_view_html,
+    view_state: counter_view_state,
     from_llm: counter_from_llm,
     from_ui: counter_from_ui,
     frontend_tools: set.from_list(["increment", "decrement"]),
@@ -162,7 +162,7 @@ fn create_protocol_free_counter() -> widget.WidgetHandle {
     update: counter_update,
     view_messages: counter_view_messages,
     view_tools: counter_view_tools,
-    view_html: counter_view_html,
+    view_state: counter_view_state,
     from_llm: counter_from_llm,
     from_ui: counter_from_ui,
     frontend_tools: set.from_list(["increment", "decrement"]),
@@ -470,19 +470,19 @@ pub fn handle_widget_event_dispatches_to_children_test() {
 }
 
 // ============================================================================
-// Tests: changed_html
+// Tests: changed_state
 // ============================================================================
 
-pub fn changed_html_detects_no_change_test() {
+pub fn changed_state_detects_no_change_test() {
   let ctx = create_default_context()
-  let changes = context.changed_html(old: ctx, new: ctx)
+  let changes = context.changed_state(old: ctx, new: ctx)
   changes |> should.equal([])
 }
 
-pub fn changed_html_detects_child_change_test() {
+pub fn changed_state_detects_child_change_test() {
   let ctx = create_context_with_counter()
 
-  // Dispatch increment via UI to change counter HTML
+  // Dispatch increment via UI to change counter state
   let new_ctx =
     context.handle_widget_event(
       context: ctx,
@@ -490,11 +490,10 @@ pub fn changed_html_detects_child_change_test() {
       args: nil_args(),
     )
 
-  let changes = context.changed_html(old: ctx, new: new_ctx)
+  let events = context.changed_state(old: ctx, new: new_ctx)
 
-  // Counter widget should have changed
-  let changed_ids = list.map(changes, fn(pair) { pair.0 })
-  list.contains(changed_ids, "counter") |> should.be_true
+  // Should have events from the changed counter widget
+  list.is_empty(events) |> should.be_false
 }
 
 // ============================================================================

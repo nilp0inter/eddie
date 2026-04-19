@@ -106,6 +106,14 @@ tasks:
     cmds:
       - gleam format --check
 
+  backend:run:
+    desc: Run the backend server
+    dir: backend
+    deps:
+      - backend:build
+    cmds:
+      - gleam run
+
   # ── Project-wide ────────────────────────────────────────────────────
   build:local:
     desc: Build all packages

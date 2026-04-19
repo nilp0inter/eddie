@@ -1,6 +1,8 @@
 # Inline HTML + plain JS over Lustre SPA
 
-**The decision.** The browser frontend is a self-contained HTML page with embedded CSS and ~150 lines of vanilla JavaScript, served as an inline string from `frontend.gleam` (extracted from `server.gleam`), rather than a Lustre SPA compiled to JavaScript as a separate compilation unit.
+> **Superseded.** Phase 2 replaced `view_html` with `view_state` returning `List(ServerEvent)`, removed the `lustre` dependency from the backend, and replaced the inline HTML/JS frontend with a minimal event-logging stub. The backend no longer produces HTML. A Lustre SPA frontend is planned for Phase 4.
+
+**The decision.** The browser frontend was a self-contained HTML page with embedded CSS and ~150 lines of vanilla JavaScript, served as an inline string from `frontend.gleam`, rather than a Lustre SPA compiled to JavaScript as a separate compilation unit.
 
 ## Why this and not the alternatives
 
@@ -10,24 +12,24 @@ Three approaches were considered:
 
 2. **htmx with server-rendered fragments** — Calipso's approach. Depends on the htmx library for out-of-band DOM swapping over WebSocket. Adds an external JS dependency and couples the wire protocol to htmx's `hx-swap-oob` attribute convention.
 
-3. **Inline HTML + plain JS (chosen)** — the page is a Gleam string constant in `frontend.gleam` (served by `server.gleam`). The JavaScript handles WebSocket connection, JSON message parsing, manual DOM element replacement keyed by `data-swap-oob` IDs, activity bar panel toggling, markdown rendering, and tool call display. No build step, no external JS dependencies, no second compilation target.
+3. **Inline HTML + plain JS (chosen at the time)** — the page was a Gleam string constant in `frontend.gleam` (served by `server.gleam`). The JavaScript handled WebSocket connection, JSON message parsing, manual DOM element replacement, activity bar panel toggling, markdown rendering, and tool call display. No build step, no external JS dependencies, no second compilation target.
 
-The inline approach was chosen because:
-- Eddie's widgets already produce server-side HTML via `view_html` (Lustre elements rendered to strings). The browser just needs to display and swap these fragments — it doesn't need a client-side virtual DOM.
-- A Lustre SPA would duplicate rendering logic: widgets would render HTML on the server *and* the client would need to understand widget state to render its own UI.
-- The inline approach gets to a fully functional frontend with zero additional build complexity.
-- All widget interactivity flows through `sendWidgetEvent` → WebSocket → agent → widget `from_ui`, which is architecturally clean even though it round-trips every interaction.
+## Why it was superseded
 
-## What it costs
+The inline approach was replaced in Phase 2 because:
+- Widgets now produce `List(ServerEvent)` domain events instead of HTML — there is no server-side HTML to swap.
+- The `lustre` dependency was removed from the backend entirely.
+- The frontend was replaced with a minimal event-logging stub that displays raw JSON events, serving as a placeholder until the Lustre SPA is built in Phase 4.
+- The costs identified below (no client-side state, innerHTML clobbering, string literal awkwardness) are no longer relevant since the inline HTML approach is gone.
 
-- **No client-side interactivity beyond what the server pushes.** Every widget interaction (task toggle, memory edit, file open) must round-trip through the WebSocket to the agent and back. There is no optimistic UI or client-side state.
-- **The HTML page is a string literal in Gleam source** (`frontend.gleam`). It's awkward to edit (no syntax highlighting, escaping issues with quotes), and there's no hot-reload during frontend development. The inline page now exceeds ~200 lines of HTML/CSS and ~150 lines of JS, which is past the original threshold for reconsidering this approach (see [tech debt](../tech-debt.md)).
-- **No type safety in the frontend.** The JavaScript is hand-written with no compile-time guarantees — typos in element IDs or message formats are caught only at runtime. Widget `view_html` functions embed inline JS handlers as string attributes, adding another layer of untyped glue.
-- **Widget HTML updates replace `innerHTML` wholesale** rather than diffing. For simple widgets this is fine; for widgets with form inputs or scroll position, the swap destroys local state. Textarea content in the system prompt widget, for example, resets on every server-pushed update.
-- **The client-side markdown renderer is minimal.** It handles common patterns (fenced code, bold, italic, headers, lists) but not nested formatting, tables, or escaped characters.
+## What it cost (historical)
 
-## What would make us reconsider
+- No client-side interactivity beyond what the server pushed.
+- The HTML page was a string literal in Gleam source — awkward to edit.
+- No type safety in the frontend JavaScript.
+- Widget HTML updates replaced `innerHTML` wholesale, destroying local state.
+- The client-side markdown renderer was minimal (~15 lines of regex).
 
-- **Widgets need client-side state** (e.g., a code editor widget, drag-and-drop task reordering, or inline memory editing with undo). At that point, the round-trip latency for every interaction becomes unacceptable and a client-side framework is justified.
-- **Multi-agent support requires complex client-side routing** (agent selection, per-agent dashboards, spawning UI). Phase 6 added `AgentTree` with hierarchical agents, but the frontend currently only connects to a single agent. Exposing multi-agent navigation in the UI would be a natural trigger for a Lustre SPA.
-- **The innerHTML replacement problem becomes blocking.** If widgets with persistent local state (form inputs, scroll position, selection) are frequently clobbered by server pushes, the lack of client-side diffing becomes a usability issue rather than a theoretical cost.
+## What made us reconsider
+
+The Phase 2 architectural change (widgets producing domain events instead of HTML) made the inline HTML approach structurally incompatible. The backend no longer generates HTML, so the frontend must render its own UI from domain events — exactly the use case for a Lustre SPA.

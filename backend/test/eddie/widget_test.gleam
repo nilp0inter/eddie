@@ -3,14 +3,13 @@ import gleam/json
 import gleam/option.{None, Some}
 import gleam/set
 import gleeunit/should
-import lustre/element.{type Element}
-import lustre/element/html
 
 import eddie/cmd
 import eddie/coerce
 import eddie/tool
 import eddie/widget
 import eddie_shared/message
+import eddie_shared/protocol.{type ServerEvent}
 
 // ============================================================================
 // A minimal test widget: a counter with increment/decrement
@@ -73,8 +72,8 @@ fn counter_view_tools(_model: CounterModel) -> List(tool.ToolDefinition) {
   [td]
 }
 
-fn counter_view_html(model: CounterModel) -> Element(Nil) {
-  html.div([], [html.text("Count: " <> int_to_string(model.count))])
+fn counter_view_state(_model: CounterModel) -> List(ServerEvent) {
+  []
 }
 
 fn counter_from_llm(
@@ -112,7 +111,7 @@ fn create_counter() -> widget.WidgetHandle {
     update: counter_update,
     view_messages: counter_view_messages,
     view_tools: counter_view_tools,
-    view_html: counter_view_html,
+    view_state: counter_view_state,
     from_llm: counter_from_llm,
     from_ui: counter_from_ui,
     frontend_tools: set.from_list(["increment", "decrement"]),
@@ -194,7 +193,7 @@ pub fn dispatch_llm_with_tool_result_test() {
       update: counter_update,
       view_messages: counter_view_messages,
       view_tools: counter_view_tools,
-      view_html: counter_view_html,
+      view_state: counter_view_state,
       from_llm: fn(_model, tool_name, _args) {
         case tool_name {
           "set_count" -> Ok(SetCount(3))
