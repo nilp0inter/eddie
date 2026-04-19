@@ -1,8 +1,10 @@
 /// HTTP server and WebSocket handler — serves the Eddie web UI.
 ///
 /// Uses mist for HTTP serving and WebSocket connections.
-/// Each WebSocket connection subscribes to a specific agent (identified
-/// by path: /ws/<agent_id>) for state updates.
+///
+/// Two WebSocket endpoints:
+/// - /ws/control — system-level: tree change events, root agent spawning
+/// - /ws/<agent_id> — per-agent: state updates, user messages, widget events
 import eddie/agent.{type AgentMessage}
 import eddie/agent_tree.{type AgentTreeMessage}
 import eddie_shared/agent_info
@@ -12,7 +14,6 @@ import gleam/erlang/process.{type Subject}
 import gleam/http/request
 import gleam/http/response
 import gleam/json
-import gleam/list
 import gleam/option.{type Option, Some}
 import gleam/otp/actor
 import gleam/otp/static_supervisor.{type Supervisor}
@@ -25,73 +26,6 @@ pub type ServerConfig {
 }
 
 // ============================================================================
-// WebSocket registry — tracks all connected clients for broadcasts
-// ============================================================================
-
-/// Messages for the WebSocket registry actor.
-pub opaque type RegistryMessage {
-  Register(subject: Subject(String))
-  Unregister(subject: Subject(String))
-  Broadcast(payload: String)
-}
-
-type RegistryState {
-  RegistryState(clients: List(Subject(String)))
-}
-
-fn start_registry() -> Result(Subject(RegistryMessage), actor.StartError) {
-  let result =
-    actor.new(RegistryState(clients: []))
-    |> actor.on_message(handle_registry_message)
-    |> actor.start
-  case result {
-    Ok(started) -> Ok(started.data)
-    Error(err) -> Error(err)
-  }
-}
-
-fn handle_registry_message(
-  state: RegistryState,
-  msg: RegistryMessage,
-) -> actor.Next(RegistryState, RegistryMessage) {
-  case msg {
-    Register(subject) ->
-      actor.continue(RegistryState(clients: [subject, ..state.clients]))
-    Unregister(subject) ->
-      actor.continue(
-        RegistryState(
-          clients: list.filter(state.clients, fn(s) { s != subject }),
-        ),
-      )
-    Broadcast(payload) -> {
-      list.each(state.clients, fn(s) { process.send(s, payload) })
-      actor.continue(state)
-    }
-  }
-}
-
-fn registry_register(
-  registry: Subject(RegistryMessage),
-  subject: Subject(String),
-) -> Nil {
-  process.send(registry, Register(subject:))
-}
-
-fn registry_unregister(
-  registry: Subject(RegistryMessage),
-  subject: Subject(String),
-) -> Nil {
-  process.send(registry, Unregister(subject:))
-}
-
-fn registry_broadcast(
-  registry: Subject(RegistryMessage),
-  payload: String,
-) -> Nil {
-  process.send(registry, Broadcast(payload:))
-}
-
-// ============================================================================
 // Server start
 // ============================================================================
 
@@ -100,8 +34,7 @@ pub fn start(
   config config: ServerConfig,
   tree tree: Subject(AgentTreeMessage),
 ) -> Result(actor.Started(Supervisor), actor.StartError) {
-  let assert Ok(registry) = start_registry()
-  mist.new(fn(req) { handle_request(req, tree, registry) })
+  mist.new(fn(req) { handle_request(req, tree) })
   |> mist.port(config.port)
   |> mist.bind("0.0.0.0")
   |> mist.start
@@ -114,13 +47,13 @@ pub fn start(
 fn handle_request(
   req: request.Request(mist.Connection),
   tree: Subject(AgentTreeMessage),
-  registry: Subject(RegistryMessage),
 ) -> response.Response(mist.ResponseData) {
   case request.path_segments(req) {
     [] -> serve_index()
     ["app.js"] -> serve_app_js()
     ["agents"] -> serve_agents(tree)
-    ["ws", agent_id] -> upgrade_websocket(req, tree, registry, agent_id)
+    ["ws", "control"] -> upgrade_control_websocket(req, tree)
+    ["ws", agent_id] -> upgrade_agent_websocket(req, tree, agent_id)
     _ -> not_found()
   }
 }
@@ -248,28 +181,147 @@ fn index_html() -> String {
 }
 
 // ============================================================================
-// WebSocket handler
+// Control WebSocket — system-level events and commands
 // ============================================================================
 
-/// Custom messages the WebSocket process receives from the agent.
-type WsCustomMessage {
-  StateUpdate(payload: String)
+/// Custom messages for the control WebSocket process.
+type ControlWsCustomMessage {
+  TreeUpdate(payload: String)
 }
 
-/// WebSocket connection state.
-type WsState {
-  WsState(
-    agent: Subject(AgentMessage),
+/// Control WebSocket state.
+type ControlWsState {
+  ControlWsState(
     tree: Subject(AgentTreeMessage),
-    registry: Subject(RegistryMessage),
     update_subject: Subject(String),
   )
 }
 
-fn upgrade_websocket(
+fn upgrade_control_websocket(
   req: request.Request(mist.Connection),
   tree: Subject(AgentTreeMessage),
-  registry: Subject(RegistryMessage),
+) -> response.Response(mist.ResponseData) {
+  mist.websocket(
+    request: req,
+    handler: fn(state, msg, conn) {
+      handle_control_ws_message(state: state, msg: msg, conn: conn)
+    },
+    on_init: fn(conn) { control_ws_init(tree, conn) },
+    on_close: fn(state) { control_ws_close(state) },
+  )
+}
+
+fn control_ws_init(
+  tree: Subject(AgentTreeMessage),
+  conn: mist.WebsocketConnection,
+) -> #(ControlWsState, Option(process.Selector(ControlWsCustomMessage))) {
+  let update_subject = process.new_subject()
+
+  let selector =
+    process.new_selector()
+    |> process.select_map(update_subject, fn(payload) {
+      TreeUpdate(payload:)
+    })
+
+  // Subscribe to tree change events
+  agent_tree.subscribe_tree(tree: tree, subscriber: update_subject)
+
+  // Send initial tree state
+  let roots = agent_tree.get_tree(tree: tree)
+  let event = protocol.AgentTreeChanged(roots: roots)
+  let payload = protocol.server_events_to_json_string([event])
+  let _sent = mist.send_text_frame(conn, payload)
+
+  let state = ControlWsState(tree: tree, update_subject: update_subject)
+  #(state, Some(selector))
+}
+
+fn control_ws_close(state: ControlWsState) -> Nil {
+  agent_tree.unsubscribe_tree(
+    tree: state.tree,
+    subscriber: state.update_subject,
+  )
+}
+
+fn handle_control_ws_message(
+  state state: ControlWsState,
+  msg msg: mist.WebsocketMessage(ControlWsCustomMessage),
+  conn conn: mist.WebsocketConnection,
+) -> mist.Next(ControlWsState, ControlWsCustomMessage) {
+  case msg {
+    mist.Text(text) -> {
+      handle_control_client_message(state: state, text: text, conn: conn)
+      mist.continue(state)
+    }
+    mist.Custom(TreeUpdate(payload)) -> {
+      let _sent = mist.send_text_frame(conn, payload)
+      mist.continue(state)
+    }
+    mist.Binary(_) -> mist.continue(state)
+    mist.Closed | mist.Shutdown -> {
+      control_ws_close(state)
+      mist.stop()
+    }
+  }
+}
+
+fn handle_control_client_message(
+  state state: ControlWsState,
+  text text: String,
+  conn conn: mist.WebsocketConnection,
+) -> Nil {
+  case json.parse(text, protocol.client_command_decoder()) {
+    Ok(protocol.SpawnRootAgent) -> {
+      let id = generate_uuid()
+      let label = "Agent"
+      let system_prompt =
+        "You are Eddie, a helpful AI assistant. You work within a task-based workflow where your conversation is managed through tasks. Follow the task protocol carefully: create tasks, record memories aggressively, and close tasks when done."
+      case
+        agent_tree.spawn_root(
+          tree: state.tree,
+          id: id,
+          label: label,
+          system_prompt: system_prompt,
+        )
+      {
+        Ok(_) -> Nil
+        Error(_) -> {
+          let event =
+            protocol.AgentSpawnFailed(
+              id: id,
+              reason: "Failed to create agent",
+            )
+          let payload = protocol.server_events_to_json_string([event])
+          let _sent = mist.send_text_frame(conn, payload)
+          Nil
+        }
+      }
+    }
+    _ -> Nil
+  }
+}
+
+// ============================================================================
+// Agent WebSocket — per-agent state updates and commands
+// ============================================================================
+
+/// Custom messages the agent WebSocket process receives.
+type AgentWsCustomMessage {
+  AgentStateUpdate(payload: String)
+}
+
+/// Agent WebSocket connection state.
+type AgentWsState {
+  AgentWsState(
+    agent: Subject(AgentMessage),
+    tree: Subject(AgentTreeMessage),
+    update_subject: Subject(String),
+  )
+}
+
+fn upgrade_agent_websocket(
+  req: request.Request(mist.Connection),
+  tree: Subject(AgentTreeMessage),
   agent_id: String,
 ) -> response.Response(mist.ResponseData) {
   case agent_tree.get_agent(tree: tree, id: agent_id) {
@@ -282,33 +334,29 @@ fn upgrade_websocket(
       mist.websocket(
         request: req,
         handler: fn(state, msg, conn) {
-          handle_ws_message(state: state, msg: msg, conn: conn)
+          handle_agent_ws_message(state: state, msg: msg, conn: conn)
         },
-        on_init: fn(conn) { ws_init(agent_subject, tree, registry, conn) },
-        on_close: fn(state) { ws_close(state) },
+        on_init: fn(conn) { agent_ws_init(agent_subject, tree, conn) },
+        on_close: fn(state) { agent_ws_close(state) },
       )
   }
 }
 
-fn ws_init(
+fn agent_ws_init(
   agent_subject: Subject(AgentMessage),
   tree: Subject(AgentTreeMessage),
-  registry: Subject(RegistryMessage),
   conn: mist.WebsocketConnection,
-) -> #(WsState, Option(process.Selector(WsCustomMessage))) {
-  // Create a subject for receiving state updates from the agent
+) -> #(AgentWsState, Option(process.Selector(AgentWsCustomMessage))) {
   let update_subject = process.new_subject()
 
-  // Build a selector that maps updates to WsCustomMessage
   let selector =
     process.new_selector()
-    |> process.select_map(update_subject, fn(payload) { StateUpdate(payload:) })
+    |> process.select_map(update_subject, fn(payload) {
+      AgentStateUpdate(payload:)
+    })
 
   // Subscribe to agent updates
   agent.subscribe(subject: agent_subject, subscriber: update_subject)
-
-  // Register with the broadcast registry
-  registry_register(registry, update_subject)
 
   // Send initial state events so panels are populated immediately
   let initial_state =
@@ -316,66 +364,60 @@ fn ws_init(
   let _sent = mist.send_text_frame(conn, initial_state)
 
   let state =
-    WsState(
+    AgentWsState(
       agent: agent_subject,
       tree: tree,
-      registry: registry,
       update_subject: update_subject,
     )
   #(state, Some(selector))
 }
 
-fn ws_close(state: WsState) -> Nil {
+fn agent_ws_close(state: AgentWsState) -> Nil {
   agent.unsubscribe(subject: state.agent, subscriber: state.update_subject)
-  registry_unregister(state.registry, state.update_subject)
 }
 
-fn handle_ws_message(
-  state state: WsState,
-  msg msg: mist.WebsocketMessage(WsCustomMessage),
+fn handle_agent_ws_message(
+  state state: AgentWsState,
+  msg msg: mist.WebsocketMessage(AgentWsCustomMessage),
   conn conn: mist.WebsocketConnection,
-) -> mist.Next(WsState, WsCustomMessage) {
+) -> mist.Next(AgentWsState, AgentWsCustomMessage) {
   case msg {
     mist.Text(text) -> {
-      handle_client_message(state: state, text: text)
+      handle_agent_client_message(state: state, text: text)
       mist.continue(state)
     }
-    mist.Custom(StateUpdate(payload)) -> {
-      // Best-effort send — connection may have closed
+    mist.Custom(AgentStateUpdate(payload)) -> {
       let _sent = mist.send_text_frame(conn, payload)
       mist.continue(state)
     }
     mist.Binary(_) -> mist.continue(state)
     mist.Closed | mist.Shutdown -> {
-      ws_close(state)
+      agent_ws_close(state)
       mist.stop()
     }
   }
 }
 
-fn handle_client_message(state state: WsState, text text: String) -> Nil {
+fn handle_agent_client_message(
+  state state: AgentWsState,
+  text text: String,
+) -> Nil {
   case json.parse(text, protocol.client_command_decoder()) {
     Ok(protocol.SendUserMessage(text:)) -> {
       agent.send_message(subject: state.agent, text: text)
       Nil
     }
-    Ok(protocol.SpawnRootAgent) -> {
-      // TODO(phase4): implement root agent spawning via control WebSocket
-      Nil
-    }
     Ok(command) -> {
-      // Map other ClientCommands to widget events
-      dispatch_client_command(state, command)
+      dispatch_agent_command(state, command)
     }
     Error(_) -> Nil
   }
 }
 
-fn dispatch_client_command(
-  state: WsState,
+fn dispatch_agent_command(
+  state: AgentWsState,
   command: protocol.ClientCommand,
 ) -> Nil {
-  // Map ClientCommand variants to the existing widget event dispatch
   let result = case command {
     protocol.SetGoal(text:) ->
       Ok(#(
@@ -460,7 +502,7 @@ fn dispatch_client_command(
         "close_read_file",
         "{\"path\": " <> json.to_string(json.string(path)) <> "}",
       ))
-    // SendUserMessage and SpawnRootAgent are handled above
+    // SpawnRootAgent is handled by control WS, SendUserMessage handled above
     protocol.SendUserMessage(..) | protocol.SpawnRootAgent -> Error(Nil)
   }
   case result {
@@ -475,3 +517,10 @@ fn dispatch_client_command(
     Error(_) -> Nil
   }
 }
+
+// ============================================================================
+// FFI
+// ============================================================================
+
+@external(erlang, "eddie_ffi", "generate_uuid")
+fn generate_uuid() -> String
