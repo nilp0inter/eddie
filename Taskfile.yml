@@ -31,9 +31,11 @@ tasks:
       - gleam format --check
 
   lint:
-    desc: Lint the project (format check)
+    desc: Lint the project (format check + glinter)
     deps:
       - format:check
+    cmds:
+      - gleam run -m glinter
 
   tests:unit:
     desc: Run all tests

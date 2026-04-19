@@ -20,4 +20,7 @@
 # Decisions & Debt
 
 - [Trade-off Summary](./decisions/tradeoffs.md)
+  - [Type erasure via closures](./decisions/tradeoffs/01-type-erasure-via-closures.md)
+  - [Unsafe coercion for send](./decisions/tradeoffs/02-unsafe-coerce-for-send.md)
+  - [Result types instead of panics](./decisions/tradeoffs/03-result-over-panic.md)
 - [Technical Debt](./decisions/tech-debt.md)
