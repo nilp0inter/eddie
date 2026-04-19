@@ -1,0 +1,11 @@
+name = "eddie"
+version = "0.1.0"
+description = "A harness for ralph loops"
+licences = ["Apache-2.0"]
+repository = { type = "github", user = "nilp0inter", repo = "eddie" }
+
+[dependencies]
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"

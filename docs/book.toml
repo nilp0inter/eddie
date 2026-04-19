@@ -1,0 +1,8 @@
+[book]
+title = "Eddie"
+authors = ["nilp0inter"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"

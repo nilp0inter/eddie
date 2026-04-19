@@ -1,0 +1,14 @@
+# Nix / direnv
+.direnv
+
+# go-task checksum cache
+.task/
+
+# Gleam build output
+build/
+
+# Documentation build output
+docs/book/
+
+# Environment files
+.env
