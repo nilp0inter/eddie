@@ -171,6 +171,27 @@ fn index_html() -> String {
     .send-btn { padding: 8px 16px; background: #cba6f7; color: #1e1e2e; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 600; }
     .send-btn:hover { background: #b4befe; }
     .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .back-btn { background: none; border: none; color: #89b4fa; cursor: pointer; font-family: inherit; font-size: 13px; padding: 4px 8px; border-radius: 4px; }
+    .back-btn:hover { background: #313244; }
+    .agent-id-label { font-size: 11px; color: #6c7086; margin-left: 8px; flex: 1; }
+    .agent-list-page { flex: 1; padding: 24px; overflow-y: auto; }
+    .agent-list-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .agent-list-header h2 { font-size: 18px; color: #cdd6f4; }
+    .agent-list-empty { text-align: center; padding: 48px 0; }
+    .agent-list { display: flex; flex-direction: column; gap: 8px; }
+    .agent-card { padding: 12px 16px; background: #181825; border: 1px solid #313244; border-radius: 8px; cursor: pointer; }
+    .agent-card:hover { border-color: #cba6f7; }
+    .agent-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+    .agent-card-label { font-size: 14px; font-weight: 600; color: #cdd6f4; }
+    .agent-card-status { font-size: 10px; padding: 2px 6px; border-radius: 4px; }
+    .agent-card-status.status-idle { color: #6c7086; background: #6c70861a; }
+    .agent-card-status.status-running { color: #f9e2af; background: #f9e2af1a; }
+    .agent-card-status.status-completed { color: #a6e3a1; background: #a6e3a11a; }
+    .agent-card-status.status-error { color: #f38ba8; background: #f38ba81a; }
+    .agent-card-id { font-size: 11px; color: #6c7086; }
+    .agent-card-children { font-size: 11px; color: #a6adc8; margin-top: 4px; }
+    .agent-card-subtree { margin-top: 8px; margin-left: 16px; display: flex; flex-direction: column; gap: 4px; }
+    .agent-card-subtree .agent-card { padding: 8px 12px; }
   </style>
 </head>
 <body>

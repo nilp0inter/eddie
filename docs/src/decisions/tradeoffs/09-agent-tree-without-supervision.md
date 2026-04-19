@@ -1,6 +1,6 @@
 # Agent tree without OTP supervision
 
-**The decision.** `AgentTree` spawns child agents as standalone OTP actors via `agent.start_with_send_fn` instead of placing them under an OTP supervisor. The tree itself is an OTP actor (for runtime child spawning and lookup), but it does not supervise its children.
+**The decision.** `AgentTree` spawns all agents (roots and children at arbitrary depth) as standalone OTP actors via `agent.start_with_send_fn` instead of placing them under an OTP supervisor. The tree itself is an OTP actor (for runtime spawning, lookup, and tree structure), but it does not supervise its agents.
 
 ## Why this and not the alternatives
 
@@ -11,9 +11,10 @@ The main alternative was using `gleam_otp`'s `supervisor` module to supervise ch
 
 ## What it costs
 
-- No automatic recovery if a child agent process crashes — the tree actor will hold a dead Subject, and calls to it will time out.
-- No structured shutdown — stopping the tree does not stop children. Orphaned child actors continue running until the BEAM VM shuts down.
-- No health monitoring — the tree has no way to detect a crashed child without attempting to communicate with it.
+- No automatic recovery if an agent process crashes — the tree actor will hold a dead Subject, and calls to it will time out. With rose-tree nesting, a crashed parent leaves orphaned children with a dead `parent_id`.
+- No structured shutdown — stopping the tree does not stop agents. Orphaned actors continue running until the BEAM VM shuts down.
+- No health monitoring — the tree has no way to detect a crashed agent without attempting to communicate with it.
+- Mailbox messages sent to a crashed agent accumulate in the broker with no delivery.
 
 ## What would make us reconsider
 

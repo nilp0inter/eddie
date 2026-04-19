@@ -13,3 +13,5 @@
 11. [Synchronous simplifile IO inside CmdEffect](./tradeoffs/11-simplifile-sync-io-in-cmdeffect.md) — file explorer uses simplifile; async when LLM-dispatched, sync when UI-dispatched
 12. [Client-side markdown rendering](./tradeoffs/12-client-side-markdown-rendering.md) — ~~regex-based JS parser in the browser~~ **superseded** (Phase 2 removed inline frontend; Phase 4 Lustre SPA displays plain text)
 13. [Async agent with spawned effects](./tradeoffs/13-async-agent-with-spawned-effects.md) — LLM calls and tool effects run in spawned processes; agent never blocks
+14. [Closure-based widget injection](./tradeoffs/14-closure-based-widget-injection.md) — subagent_manager uses closures from agent_tree to break import cycles
+15. [Central mailbox broker](./tradeoffs/15-central-mailbox-broker.md) — shared OTP actor for inter-agent communication instead of direct messaging

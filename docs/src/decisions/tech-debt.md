@@ -44,9 +44,9 @@ The agent spawns processes for LLM HTTP calls and tool effects via `process.spaw
 
 After sending usage data to the token_usage widget, `record_token_usage` creates an entirely new `Context` via `context.new(system_prompt, new_children, log)`, which triggers a full `rebuild_tool_owners` scan. This is an extra O(widgets × tools) rebuild per LLM response beyond the rebuilds already triggered by `add_response`. For the current widget count (5 widgets, ~12 tools) this is negligible, but it's architecturally wasteful. A `Context.update_child` or `Context.send_to_child` function would eliminate the reconstruction, but it would add mutation surface to an interface that is currently compose-and-dispatch only.
 
-## AgentTree holds dead Subjects after child crashes
+## AgentTree holds dead Subjects after agent crashes
 
-`AgentTree` is an OTP actor that stores child agent Subjects in a `Dict` but has no process monitoring. If a child actor crashes, its Subject remains in the dict. Any attempt to communicate with the dead child (via `agent_tree.get_agent`) will return a dead Subject, and calls to it will hang until timeout. There is no API to remove a child or detect a crashed one. Adding `process.monitor` for each child and handling `ProcessDown` messages in the tree actor would fix this.
+`AgentTree` stores all agent Subjects in a flat `Dict` but has no process monitoring. If an agent actor crashes, its Subject remains in the dict — and so do its children's entries and parent references. Any attempt to communicate with the dead agent (via `agent_tree.get_agent`) will return a dead Subject, and calls to it will hang until timeout. There is no API to remove an agent or detect a crashed one. With rose-tree nesting, a crashed parent leaves orphaned children that still reference a dead `parent_id`. Adding `process.monitor` for each agent and handling `ProcessDown` messages in the tree actor (with cascading cleanup of orphaned children) would fix this.
 
 ## File explorer reads entire files into memory
 
@@ -59,4 +59,24 @@ The file explorer's `open_directory` and `read_file` tools accept arbitrary path
 ## Token usage state change invisible to subscribers
 
 In `agent.gleam`, `record_token_usage` updates the context before `old_ctx` is captured for the subsequent `notify_subscribers` call. This means the token usage widget's state change is included in both old and new context snapshots, so `changed_state` never detects it. Token usage updates only become visible when another widget's state changes in the same notification cycle (e.g., the conversation log). The fix would be to capture `old_ctx` before `record_token_usage`, but this changes the notification semantics for all widgets in that cycle.
+
+## No agent deletion or cleanup
+
+There is no way to delete an agent from the tree — once spawned, an agent lives until the BEAM VM shuts down. The tree has no `RemoveAgent` message, the protocol has no `DeleteAgent` command, and the frontend has no delete button. For long-running sessions where users create many throwaway root agents, this will accumulate memory. Adding a `RemoveAgent` message to the tree (with cascading child removal) and a corresponding protocol command would fix this.
+
+## Mailbox broker has no persistence or size limits
+
+The `MailboxBroker` stores all messages in-memory `Dict`s with no eviction, no size limits, and no persistence. A long-running session with chatty agents will accumulate messages indefinitely. All messages are lost on restart. If inbox sizes become a concern, adding a maximum inbox size with oldest-message eviction would be the minimal fix.
+
+## Mailbox widget child_ids not updated at runtime
+
+When a parent agent spawns a child via the `subagent_manager` tool, the mailbox widget's `child_ids` list is not updated — it was set at agent creation time and is immutable thereafter. This means the parent's `send_to_child` tool won't recognize newly spawned children until the mailbox widget is somehow reconstructed. The fix would be to add a `ChildSpawned` message to the mailbox widget's update function and have the agent_tree or subagent_manager notify it when a child is added.
+
+## Agent status not tracked at runtime
+
+`AgentTree` stores an `AgentStatus` per agent but never updates it — all agents show `AgentIdle` regardless of whether they're mid-turn. The `update_status` API exists and is called nowhere. Wiring `TurnStarted`/`TurnCompleted` events from the agent to the tree via `update_status` would make the status live, but requires the agent to know its tree's Subject (currently not passed to the agent).
+
+## UUID generation uses hand-rolled Erlang FFI
+
+`eddie_ffi.erl` contains a hand-rolled UUID v4 generator using `crypto:strong_rand_bytes`. This works but doesn't use a standard UUID library. If Erlang's `uuid` module or a hex.pm UUID package is available, replacing the FFI would be cleaner. The current implementation correctly sets version and variant bits but has no tests.
 

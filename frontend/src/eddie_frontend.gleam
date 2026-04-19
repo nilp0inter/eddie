@@ -1,11 +1,15 @@
 /// Eddie frontend — Lustre SPA.
 ///
-/// Single-module Lustre application that connects to the backend via
-/// WebSocket and renders a chat UI with sidebar panels.
-/// Supports multiple agents — each agent has its own WebSocket connection
-/// and cached state. The user switches between agents via a tab bar.
+/// Two-page application:
+/// - AgentListPage: landing page showing the agent forest, "+" creates root agents
+/// - AgentConversationPage: chat UI for a specific agent with sidebar panels
+///
+/// Two WebSocket connections:
+/// - Control WS (/ws/control): always connected, receives tree changes, sends SpawnRootAgent
+/// - Agent WS (/ws/<id>): connected only when viewing a conversation
+import eddie_shared/agent_info.{type AgentInfo, type AgentTreeNode}
+import eddie_shared/mailbox.{type MailMessage}
 import eddie_shared/message
-import eddie_shared/agent_info.{type AgentInfo, AgentInfo}
 import eddie_shared/protocol.{
   type ClientCommand, type DirectorySnapshot, type FileSnapshot,
   type LogItemSnapshot, type ServerEvent, type TaskSnapshot, type TokenRecord,
@@ -36,9 +40,6 @@ fn ffi_set_timeout(callback: fn() -> Nil, delay_ms: Int) -> Nil
 @external(javascript, "./eddie_frontend_ffi.mjs", "scroll_to_bottom")
 fn ffi_scroll_to_bottom(element_id: String) -> Nil
 
-@external(javascript, "./eddie_frontend_ffi.mjs", "fetch_json")
-fn ffi_fetch_json(url: String, callback: fn(String) -> Nil) -> Nil
-
 // ============================================================================
 // Model
 // ============================================================================
@@ -49,11 +50,18 @@ type ConnectionStatus {
   Disconnected
 }
 
+type Page {
+  AgentListPage
+  AgentConversationPage(agent_id: String)
+}
+
 type Panel {
   GoalPanel
   TasksPanel
   FilesPanel
   TokensPanel
+  SubagentsPanel
+  MailboxPanel
 }
 
 /// Per-agent cached state.
@@ -68,6 +76,9 @@ type AgentState {
     token_records: List(TokenRecord),
     thinking: Bool,
     active_tool_calls: Dict(String, String),
+    subagents: List(AgentInfo),
+    inbox: List(MailMessage),
+    outbox: List(MailMessage),
   )
 }
 
@@ -82,63 +93,67 @@ fn empty_agent_state() -> AgentState {
     token_records: [],
     thinking: False,
     active_tool_calls: dict.new(),
+    subagents: [],
+    inbox: [],
+    outbox: [],
   )
-}
-
-/// State for the inline spawn-agent form.
-type SpawnForm {
-  SpawnForm(id: String, label: String, system_prompt: String)
-}
-
-fn empty_spawn_form() -> SpawnForm {
-  SpawnForm(id: "", label: "", system_prompt: "")
 }
 
 type Model {
   Model(
-    ws: Option(ws.WebSocket),
-    connection: ConnectionStatus,
-    /// Monotonically increasing counter. Incremented each time we
-    /// intentionally start a new connection (init, switch, reconnect).
-    /// Timers (CheckConnection, AttemptReconnect) carry the generation
-    /// they were created for and are ignored when stale.
-    ws_generation: Int,
-    active_agent: String,
-    agent_list: List(AgentInfo),
+    page: Page,
+    /// Control WS — always connected, for tree events
+    control_ws: Option(ws.WebSocket),
+    control_connection: ConnectionStatus,
+    control_ws_generation: Int,
+    /// Agent WS — connected only when on conversation page
+    agent_ws: Option(ws.WebSocket),
+    agent_connection: ConnectionStatus,
+    agent_ws_generation: Int,
+    /// Agent tree (rose-tree forest)
+    agent_tree: List(AgentTreeNode),
+    /// Per-agent cached states
     agents: Dict(String, AgentState),
     chat_input: String,
     active_panel: Option(Panel),
-    show_spawn_form: Bool,
-    spawn_form: SpawnForm,
   )
 }
 
 fn empty_model() -> Model {
   Model(
-    ws: None,
-    connection: Connecting,
-    ws_generation: 0,
-    active_agent: "root",
-    agent_list: [AgentInfo(id: "root", label: "Root", parent_id: None, status: agent_info.AgentIdle)],
-    agents: dict.from_list([#("root", empty_agent_state())]),
+    page: AgentListPage,
+    control_ws: None,
+    control_connection: Connecting,
+    control_ws_generation: 0,
+    agent_ws: None,
+    agent_connection: Disconnected,
+    agent_ws_generation: 0,
+    agent_tree: [],
+    agents: dict.new(),
     chat_input: "",
     active_panel: None,
-    show_spawn_form: False,
-    spawn_form: empty_spawn_form(),
   )
 }
 
-/// Get the active agent's state (never fails — empty state as fallback).
-fn active_state(model: Model) -> AgentState {
-  case dict.get(model.agents, model.active_agent) {
-    Ok(state) -> state
-    Error(_) -> empty_agent_state()
+/// Get the current agent's state (only valid on conversation page).
+fn current_agent_state(model: Model) -> AgentState {
+  case model.page {
+    AgentConversationPage(agent_id) ->
+      case dict.get(model.agents, agent_id) {
+        Ok(state) -> state
+        Error(_) -> empty_agent_state()
+      }
+    AgentListPage -> empty_agent_state()
   }
 }
 
-/// Update the active agent's state in the model.
-fn set_active_state(model: Model, state: AgentState) -> Model {
-  Model(..model, agents: dict.insert(model.agents, model.active_agent, state))
+/// Update the current agent's state in the model.
+fn set_current_agent_state(model: Model, state: AgentState) -> Model {
+  case model.page {
+    AgentConversationPage(agent_id) ->
+      Model(..model, agents: dict.insert(model.agents, agent_id, state))
+    AgentListPage -> model
+  }
 }
 
 // ============================================================================
@@ -146,21 +161,24 @@ fn set_active_state(model: Model, state: AgentState) -> Model {
 // ============================================================================
 
 type Msg {
-  WsEvent(ws.WebSocketEvent)
+  // Control WebSocket events
+  ControlWsEvent(ws.WebSocketEvent)
+  ControlReconnect(Int)
+  ControlCheckConnection(Int)
+  // Agent WebSocket events
+  AgentWsEvent(ws.WebSocketEvent)
+  AgentReconnect(Int)
+  AgentCheckConnection(Int)
+  // Navigation
+  NavigateToAgent(String)
+  NavigateToList
+  // Agent list actions
+  CreateRootAgent
+  // Chat
   UpdateInput(String)
   SubmitMessage
+  // Sidebar
   SetActivePanel(Option(Panel))
-  /// Carries the ws_generation it was scheduled for.
-  AttemptReconnect(Int)
-  /// Carries the ws_generation it was scheduled for.
-  CheckConnection(Int)
-  SwitchAgent(String)
-  AgentListReceived(String)
-  ToggleSpawnForm
-  UpdateSpawnId(String)
-  UpdateSpawnLabel(String)
-  UpdateSpawnPrompt(String)
-  SubmitSpawn
 }
 
 // ============================================================================
@@ -172,9 +190,8 @@ fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   #(
     model,
     effect.batch([
-      ws.init("/ws/root", WsEvent),
-      fetch_agent_list(),
-      delay_effect(CheckConnection(model.ws_generation), 3000),
+      ws.init("/ws/control", ControlWsEvent),
+      delay_effect(ControlCheckConnection(model.control_ws_generation), 3000),
     ]),
   )
 }
@@ -185,89 +202,205 @@ fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
 
 fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
-    WsEvent(ws.OnOpen(socket)) -> #(
-      Model(..model, ws: Some(socket), connection: Connected),
+    // -- Control WebSocket --------------------------------------------------
+    ControlWsEvent(ws.OnOpen(socket)) -> #(
+      Model(..model, control_ws: Some(socket), control_connection: Connected),
       effect.none(),
     )
 
-    WsEvent(ws.OnTextMessage(text)) -> {
+    ControlWsEvent(ws.OnTextMessage(text)) -> {
       let events = parse_server_events(text)
-      let agent_state = active_state(model)
-      let new_agent_state = list.fold(events, agent_state, apply_server_event)
-      let new_model =
-        set_active_state(model, new_agent_state)
-        |> apply_model_events(events)
-      let scroll = scroll_chat_effect()
-      #(new_model, scroll)
+      let new_model = apply_control_events(model, events)
+      #(new_model, effect.none())
     }
 
-    WsEvent(ws.OnBinaryMessage(_)) -> #(model, effect.none())
+    ControlWsEvent(ws.OnBinaryMessage(_)) -> #(model, effect.none())
 
-    WsEvent(ws.OnClose(_)) ->
-      case model.ws {
-        // We already have a live socket — this close is from an old one
+    ControlWsEvent(ws.OnClose(_)) ->
+      case model.control_ws {
         Some(_) -> #(model, effect.none())
-        None ->
-          case model.connection {
-            // Intentional close during agent switch — ignore
-            Connecting -> #(model, effect.none())
-            // Genuine disconnection
-            _ -> {
-              let gen = model.ws_generation
-              #(
-                Model(..model, connection: Disconnected),
-                delay_effect(AttemptReconnect(gen), 2000),
-              )
-            }
-          }
+        None -> {
+          let gen = model.control_ws_generation
+          #(
+            Model(..model, control_connection: Disconnected),
+            delay_effect(ControlReconnect(gen), 2000),
+          )
+        }
       }
 
-    WsEvent(ws.InvalidUrl) -> {
-      let gen = model.ws_generation
+    ControlWsEvent(ws.InvalidUrl) -> {
+      let gen = model.control_ws_generation
       #(
-        Model(..model, connection: Connecting),
-        delay_effect(AttemptReconnect(gen), 2000),
+        Model(..model, control_connection: Connecting),
+        delay_effect(ControlReconnect(gen), 2000),
       )
     }
 
-    AttemptReconnect(gen) ->
-      case gen == model.ws_generation {
-        // Stale timer from a previous connection attempt — ignore
+    ControlReconnect(gen) ->
+      case gen == model.control_ws_generation {
         False -> #(model, effect.none())
         True -> {
-          let new_gen = model.ws_generation + 1
+          let new_gen = model.control_ws_generation + 1
           #(
-            Model(..model, connection: Connecting, ws_generation: new_gen),
+            Model(
+              ..model,
+              control_connection: Connecting,
+              control_ws_generation: new_gen,
+            ),
             effect.batch([
-              ws.init("/ws/" <> model.active_agent, WsEvent),
-              delay_effect(CheckConnection(new_gen), 3000),
+              ws.init("/ws/control", ControlWsEvent),
+              delay_effect(ControlCheckConnection(new_gen), 3000),
             ]),
           )
         }
       }
 
-    // Connection watchdog: if still Connecting after the timer, retry
-    CheckConnection(gen) ->
-      case gen == model.ws_generation, model.connection {
-        // Stale timer — ignore
+    ControlCheckConnection(gen) ->
+      case gen == model.control_ws_generation, model.control_connection {
         False, _ -> #(model, effect.none())
-        // Connection already established — ignore
         _, Connected -> #(model, effect.none())
-        // Still connecting with current generation — retry
         True, _ -> #(
           model,
           effect.batch([
-            ws.init("/ws/" <> model.active_agent, WsEvent),
-            delay_effect(CheckConnection(gen), 3000),
+            ws.init("/ws/control", ControlWsEvent),
+            delay_effect(ControlCheckConnection(gen), 3000),
           ]),
         )
       }
 
+    // -- Agent WebSocket ----------------------------------------------------
+    AgentWsEvent(ws.OnOpen(socket)) -> #(
+      Model(..model, agent_ws: Some(socket), agent_connection: Connected),
+      effect.none(),
+    )
+
+    AgentWsEvent(ws.OnTextMessage(text)) -> {
+      let events = parse_server_events(text)
+      let state = current_agent_state(model)
+      let new_state = list.fold(events, state, apply_server_event)
+      let new_model = set_current_agent_state(model, new_state)
+      #(new_model, scroll_chat_effect())
+    }
+
+    AgentWsEvent(ws.OnBinaryMessage(_)) -> #(model, effect.none())
+
+    AgentWsEvent(ws.OnClose(_)) ->
+      case model.agent_ws {
+        Some(_) -> #(model, effect.none())
+        None ->
+          case model.agent_connection {
+            Connecting -> #(model, effect.none())
+            _ -> {
+              let gen = model.agent_ws_generation
+              #(
+                Model(..model, agent_connection: Disconnected),
+                delay_effect(AgentReconnect(gen), 2000),
+              )
+            }
+          }
+      }
+
+    AgentWsEvent(ws.InvalidUrl) -> {
+      let gen = model.agent_ws_generation
+      #(
+        Model(..model, agent_connection: Connecting),
+        delay_effect(AgentReconnect(gen), 2000),
+      )
+    }
+
+    AgentReconnect(gen) ->
+      case gen == model.agent_ws_generation, model.page {
+        False, _ -> #(model, effect.none())
+        _, AgentListPage -> #(model, effect.none())
+        True, AgentConversationPage(agent_id) -> {
+          let new_gen = model.agent_ws_generation + 1
+          #(
+            Model(
+              ..model,
+              agent_connection: Connecting,
+              agent_ws_generation: new_gen,
+            ),
+            effect.batch([
+              ws.init("/ws/" <> agent_id, AgentWsEvent),
+              delay_effect(AgentCheckConnection(new_gen), 3000),
+            ]),
+          )
+        }
+      }
+
+    AgentCheckConnection(gen) ->
+      case gen == model.agent_ws_generation, model.agent_connection, model.page {
+        False, _, _ -> #(model, effect.none())
+        _, Connected, _ -> #(model, effect.none())
+        True, _, AgentConversationPage(agent_id) -> #(
+          model,
+          effect.batch([
+            ws.init("/ws/" <> agent_id, AgentWsEvent),
+            delay_effect(AgentCheckConnection(gen), 3000),
+          ]),
+        )
+        _, _, _ -> #(model, effect.none())
+      }
+
+    // -- Navigation ---------------------------------------------------------
+    NavigateToAgent(agent_id) -> {
+      let new_gen = model.agent_ws_generation + 1
+      let new_model =
+        Model(
+          ..model,
+          page: AgentConversationPage(agent_id),
+          agent_ws: None,
+          agent_connection: Connecting,
+          agent_ws_generation: new_gen,
+          agents: dict.insert(model.agents, agent_id, empty_agent_state()),
+          active_panel: None,
+        )
+      #(
+        new_model,
+        effect.batch([
+          ws.init("/ws/" <> agent_id, AgentWsEvent),
+          delay_effect(AgentCheckConnection(new_gen), 3000),
+        ]),
+      )
+    }
+
+    NavigateToList -> {
+      let close_effect = case model.agent_ws {
+        Some(socket) ->
+          effect.from(fn(_dispatch) {
+            ws.close(socket)
+            Nil
+          })
+        None -> effect.none()
+      }
+      #(
+        Model(
+          ..model,
+          page: AgentListPage,
+          agent_ws: None,
+          agent_connection: Disconnected,
+        ),
+        close_effect,
+      )
+    }
+
+    // -- Agent list actions -------------------------------------------------
+    CreateRootAgent -> {
+      case model.control_ws {
+        None -> #(model, effect.none())
+        Some(socket) -> {
+          let command = protocol.SpawnRootAgent
+          #(model, send_command(socket, command))
+        }
+      }
+    }
+
+    // -- Chat ---------------------------------------------------------------
     UpdateInput(text) -> #(Model(..model, chat_input: text), effect.none())
 
     SubmitMessage -> {
       let text = string.trim(model.chat_input)
-      case text, model.ws {
+      case text, model.agent_ws {
         "", _ -> #(model, effect.none())
         _, None -> #(model, effect.none())
         _, Some(socket) -> {
@@ -277,6 +410,7 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     }
 
+    // -- Sidebar ------------------------------------------------------------
     SetActivePanel(panel) -> {
       let new_panel = case model.active_panel == panel {
         True -> None
@@ -284,114 +418,13 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
       #(Model(..model, active_panel: new_panel), effect.none())
     }
-
-    SwitchAgent(agent_id) -> {
-      case agent_id == model.active_agent {
-        True -> #(model, effect.none())
-        False -> {
-          // Close current WebSocket, open new one for the selected agent.
-          // ws.close FFI returns undefined instead of a Lustre Effect,
-          // so we wrap it to avoid crashing effect.batch.
-          let close_effect = case model.ws {
-            Some(socket) ->
-              effect.from(fn(_dispatch) {
-                ws.close(socket)
-                Nil
-              })
-            None -> effect.none()
-          }
-          // Bump generation so stale timers from the old connection are
-          // ignored, and clear cached state for the target agent.
-          let new_gen = model.ws_generation + 1
-          let new_model =
-            Model(
-              ..model,
-              active_agent: agent_id,
-              ws: None,
-              connection: Connecting,
-              ws_generation: new_gen,
-              agents: dict.insert(model.agents, agent_id, empty_agent_state()),
-            )
-          #(
-            new_model,
-            effect.batch([
-              close_effect,
-              ws.init("/ws/" <> agent_id, WsEvent),
-              delay_effect(CheckConnection(new_gen), 3000),
-            ]),
-          )
-        }
-      }
-    }
-
-    AgentListReceived(text) -> {
-      case json.parse(text, decode.list(agent_info.agent_info_decoder())) {
-        Ok(agents) -> #(Model(..model, agent_list: agents), effect.none())
-        Error(_) -> #(model, effect.none())
-      }
-    }
-
-    ToggleSpawnForm -> #(
-      Model(
-        ..model,
-        show_spawn_form: !model.show_spawn_form,
-        spawn_form: empty_spawn_form(),
-      ),
-      effect.none(),
-    )
-
-    UpdateSpawnId(value) -> #(
-      Model(..model, spawn_form: SpawnForm(..model.spawn_form, id: value)),
-      effect.none(),
-    )
-
-    UpdateSpawnLabel(value) -> #(
-      Model(..model, spawn_form: SpawnForm(..model.spawn_form, label: value)),
-      effect.none(),
-    )
-
-    UpdateSpawnPrompt(value) -> #(
-      Model(
-        ..model,
-        spawn_form: SpawnForm(..model.spawn_form, system_prompt: value),
-      ),
-      effect.none(),
-    )
-
-    SubmitSpawn -> {
-      let form = model.spawn_form
-      let id = string.trim(form.id)
-      let label = string.trim(form.label)
-      case id, label, model.ws {
-        "", _, _ -> #(model, effect.none())
-        _, "", _ -> #(model, effect.none())
-        _, _, None -> #(model, effect.none())
-        _, _, Some(socket) -> {
-          let prompt = case string.trim(form.system_prompt) {
-            "" -> "You are " <> label <> ", a helpful AI assistant."
-            p -> p
-          }
-          let command = protocol.SpawnRootAgent
-          #(
-            Model(
-              ..model,
-              show_spawn_form: False,
-              spawn_form: empty_spawn_form(),
-            ),
-            send_command(socket, command),
-          )
-        }
-      }
-    }
   }
 }
 
 fn parse_server_events(text: String) -> List(ServerEvent) {
-  // Backend sends JSON arrays of events
   case json.parse(text, decode.list(protocol.server_event_decoder())) {
     Ok(events) -> events
     Error(_) ->
-      // Try single event
       case json.parse(text, protocol.server_event_decoder()) {
         Ok(event) -> [event]
         Error(_) -> []
@@ -399,6 +432,17 @@ fn parse_server_events(text: String) -> List(ServerEvent) {
   }
 }
 
+/// Apply control-level events (tree changes).
+fn apply_control_events(model: Model, events: List(ServerEvent)) -> Model {
+  list.fold(events, model, fn(m, event) {
+    case event {
+      protocol.AgentTreeChanged(roots:) -> Model(..m, agent_tree: roots)
+      _ -> m
+    }
+  })
+}
+
+/// Apply per-agent events to agent state.
 fn apply_server_event(state: AgentState, event: ServerEvent) -> AgentState {
   case event {
     protocol.AgentStateSnapshot(
@@ -531,20 +575,23 @@ fn apply_server_event(state: AgentState, event: ServerEvent) -> AgentState {
     protocol.AgentError(..) ->
       AgentState(..state, thinking: False, active_tool_calls: dict.new())
 
-    // AgentTreeChanged and AgentSpawnFailed are handled at the Model level,
-    // not the per-agent state level — they pass through here unchanged.
-    protocol.AgentTreeChanged(..) | protocol.AgentSpawnFailed(..) | protocol.ChildAgentStatusChanged(..) | protocol.SubagentsUpdated(..) | protocol.MailReceived(..) | protocol.MailSent(..) | protocol.MailboxUpdated(..) -> state
-  }
-}
+    protocol.SubagentsUpdated(children:) ->
+      AgentState(..state, subagents: children)
 
-/// Apply model-level events (agent list changes) after per-agent state updates.
-fn apply_model_events(model: Model, events: List(ServerEvent)) -> Model {
-  list.fold(events, model, fn(m, event) {
-    case event {
-      protocol.AgentTreeChanged(..) -> m
-      _ -> m
-    }
-  })
+    protocol.MailboxUpdated(inbox:, outbox:) ->
+      AgentState(..state, inbox: inbox, outbox: outbox)
+
+    protocol.MailReceived(message:) ->
+      AgentState(..state, inbox: list.append(state.inbox, [message]))
+
+    protocol.MailSent(message:) ->
+      AgentState(..state, outbox: list.append(state.outbox, [message]))
+
+    // Tree-level events handled by apply_control_events
+    protocol.AgentTreeChanged(..)
+    | protocol.AgentSpawnFailed(..)
+    | protocol.ChildAgentStatusChanged(..) -> state
+  }
 }
 
 // ============================================================================
@@ -567,109 +614,162 @@ fn scroll_chat_effect() -> Effect(Msg) {
   effect.from(fn(_dispatch) { ffi_scroll_to_bottom("chat-log") })
 }
 
-fn fetch_agent_list() -> Effect(Msg) {
-  effect.from(fn(dispatch) {
-    ffi_fetch_json("/agents", fn(text) { dispatch(AgentListReceived(text)) })
-  })
-}
-
 // ============================================================================
-// View
+// View — page dispatch
 // ============================================================================
 
 fn view(model: Model) -> Element(Msg) {
+  case model.page {
+    AgentListPage -> view_agent_list_page(model)
+    AgentConversationPage(_) -> view_conversation_page(model)
+  }
+}
+
+// ============================================================================
+// Agent List Page
+// ============================================================================
+
+fn view_agent_list_page(model: Model) -> Element(Msg) {
   html.div([attribute.class("app")], [
-    view_top_bar(model),
-    html.div([attribute.class("main")], [
-      view_sidebar(model),
-      view_chat(model),
+    html.header([attribute.class("top-bar")], [
+      html.h1([], [html.text("Eddie")]),
+      view_control_status(model),
+    ]),
+    html.div([attribute.class("agent-list-page")], [
+      html.div([attribute.class("agent-list-header")], [
+        html.h2([], [html.text("Agents")]),
+        html.button(
+          [attribute.class("add-agent-btn"), event.on_click(CreateRootAgent)],
+          [html.text("+ New Agent")],
+        ),
+      ]),
+      case model.agent_tree {
+        [] ->
+          html.div([attribute.class("agent-list-empty")], [
+            html.p([attribute.class("muted")], [
+              html.text("No agents yet. Click \"+ New Agent\" to create one."),
+            ]),
+          ])
+        roots ->
+          html.div(
+            [attribute.class("agent-list")],
+            list.map(roots, view_agent_card),
+          )
+      },
     ]),
   ])
 }
 
-fn view_top_bar(model: Model) -> Element(Msg) {
-  let status_class = case model.connection {
+fn view_agent_card(node: AgentTreeNode) -> Element(Msg) {
+  let info = node.info
+  let status_text = agent_info.status_to_string(info.status)
+  let child_count = list.length(node.children)
+  let child_text = case child_count {
+    0 -> ""
+    1 -> "1 subagent"
+    n -> int.to_string(n) <> " subagents"
+  }
+  html.div(
+    [
+      attribute.class("agent-card"),
+      event.on_click(NavigateToAgent(info.id)),
+    ],
+    [
+      html.div([attribute.class("agent-card-header")], [
+        html.span([attribute.class("agent-card-label")], [
+          html.text(info.label),
+        ]),
+        html.span(
+          [attribute.class("agent-card-status status-" <> status_text)],
+          [html.text(status_text)],
+        ),
+      ]),
+      html.div([attribute.class("agent-card-id")], [html.text(info.id)]),
+      case child_text {
+        "" -> html.text("")
+        t ->
+          html.div([attribute.class("agent-card-children")], [html.text(t)])
+      },
+      case node.children {
+        [] -> html.text("")
+        children ->
+          html.div(
+            [attribute.class("agent-card-subtree")],
+            list.map(children, view_agent_card),
+          )
+      },
+    ],
+  )
+}
+
+fn view_control_status(model: Model) -> Element(Msg) {
+  let status_class = case model.control_connection {
     Connected -> "status-connected"
     Connecting -> "status-connecting"
     Disconnected -> "status-disconnected"
   }
-  let status_text = case model.connection {
+  let status_text = case model.control_connection {
+    Connected -> "Connected"
+    Connecting -> "Connecting..."
+    Disconnected -> "Disconnected"
+  }
+  html.span([attribute.class("status " <> status_class)], [
+    html.text(status_text),
+  ])
+}
+
+// ============================================================================
+// Conversation Page
+// ============================================================================
+
+fn view_conversation_page(model: Model) -> Element(Msg) {
+  let state = current_agent_state(model)
+  html.div([attribute.class("app")], [
+    view_conversation_top_bar(model),
+    html.div([attribute.class("main")], [
+      view_sidebar(model, state),
+      view_chat(model, state),
+    ]),
+  ])
+}
+
+fn view_conversation_top_bar(model: Model) -> Element(Msg) {
+  let agent_id = case model.page {
+    AgentConversationPage(id) -> id
+    AgentListPage -> ""
+  }
+  let status_class = case model.agent_connection {
+    Connected -> "status-connected"
+    Connecting -> "status-connecting"
+    Disconnected -> "status-disconnected"
+  }
+  let status_text = case model.agent_connection {
     Connected -> "Connected"
     Connecting -> "Connecting..."
     Disconnected -> "Disconnected"
   }
   html.header([attribute.class("top-bar")], [
+    html.button(
+      [attribute.class("back-btn"), event.on_click(NavigateToList)],
+      [html.text("< Back")],
+    ),
     html.h1([], [html.text("Eddie")]),
+    html.span([attribute.class("agent-id-label")], [html.text(agent_id)]),
     html.span([attribute.class("status " <> status_class)], [
       html.text(status_text),
     ]),
-    view_agent_tabs(model),
   ])
 }
 
-fn view_agent_tabs(model: Model) -> Element(Msg) {
-  let tabs =
-    list.map(model.agent_list, fn(info) {
-      let is_active = info.id == model.active_agent
-      let classes = case is_active {
-        True -> "agent-tab active"
-        False -> "agent-tab"
-      }
-      html.button(
-        [attribute.class(classes), event.on_click(SwitchAgent(info.id))],
-        [html.text(info.label)],
-      )
-    })
-  let add_or_form = case model.show_spawn_form {
-    False ->
-      html.button(
-        [attribute.class("add-agent-btn"), event.on_click(ToggleSpawnForm)],
-        [html.text("+")],
-      )
-    True -> view_spawn_form(model.spawn_form)
-  }
-  html.div([attribute.class("agent-tabs")], list.append(tabs, [add_or_form]))
-}
-
-fn view_spawn_form(form: SpawnForm) -> Element(Msg) {
-  html.div([attribute.class("spawn-form")], [
-    html.input([
-      attribute.class("spawn-input"),
-      attribute.placeholder("id"),
-      attribute.value(form.id),
-      event.on_input(UpdateSpawnId),
-    ]),
-    html.input([
-      attribute.class("spawn-input"),
-      attribute.placeholder("label"),
-      attribute.value(form.label),
-      event.on_input(UpdateSpawnLabel),
-    ]),
-    html.input([
-      attribute.class("spawn-input wide"),
-      attribute.placeholder("system prompt (optional)"),
-      attribute.value(form.system_prompt),
-      event.on_input(UpdateSpawnPrompt),
-      on_enter_key(SubmitSpawn),
-    ]),
-    html.button([attribute.class("spawn-submit"), event.on_click(SubmitSpawn)], [
-      html.text("Create"),
-    ]),
-    html.button(
-      [attribute.class("spawn-cancel"), event.on_click(ToggleSpawnForm)],
-      [html.text("Cancel")],
-    ),
-  ])
-}
-
-fn view_sidebar(model: Model) -> Element(Msg) {
-  let state = active_state(model)
+fn view_sidebar(model: Model, state: AgentState) -> Element(Msg) {
   html.aside([attribute.class("sidebar")], [
     html.nav([attribute.class("sidebar-icons")], [
       sidebar_icon("Goal", GoalPanel, model.active_panel),
       sidebar_icon("Tasks", TasksPanel, model.active_panel),
       sidebar_icon("Files", FilesPanel, model.active_panel),
       sidebar_icon("Tokens", TokensPanel, model.active_panel),
+      sidebar_icon("Agents", SubagentsPanel, model.active_panel),
+      sidebar_icon("Mail", MailboxPanel, model.active_panel),
     ]),
     case model.active_panel {
       None -> html.text("")
@@ -680,6 +780,8 @@ fn view_sidebar(model: Model) -> Element(Msg) {
             TasksPanel -> view_tasks_panel(state)
             FilesPanel -> view_files_panel(state)
             TokensPanel -> view_tokens_panel(state)
+            SubagentsPanel -> view_subagents_panel(state)
+            MailboxPanel -> view_mailbox_panel(state)
           },
         ])
     },
@@ -798,12 +900,91 @@ fn view_tokens_panel(state: AgentState) -> Element(Msg) {
   ])
 }
 
+fn view_subagents_panel(state: AgentState) -> Element(Msg) {
+  html.div([attribute.class("panel")], [
+    html.h3([], [html.text("Subagents")]),
+    case state.subagents {
+      [] -> html.p([attribute.class("muted")], [html.text("No subagents")])
+      agents ->
+        html.ul(
+          [attribute.class("task-list")],
+          list.map(agents, fn(a) {
+            html.li([attribute.class("task-item")], [
+              html.span([attribute.class("task-icon")], [
+                html.text(status_icon_for_agent(a.status)),
+              ]),
+              html.span([attribute.class("task-desc")], [
+                html.text(a.label <> " (" <> a.id <> ")"),
+              ]),
+            ])
+          }),
+        )
+    },
+  ])
+}
+
+fn status_icon_for_agent(status: agent_info.AgentStatus) -> String {
+  case status {
+    agent_info.AgentIdle -> "[-]"
+    agent_info.AgentRunning -> "[~]"
+    agent_info.AgentCompleted -> "[x]"
+    agent_info.AgentError -> "[!]"
+  }
+}
+
+fn view_mailbox_panel(state: AgentState) -> Element(Msg) {
+  html.div([attribute.class("panel")], [
+    html.h3([], [html.text("Mailbox")]),
+    html.div([], [
+      html.h3([], [
+        html.text("Inbox (" <> int.to_string(list.length(state.inbox)) <> ")"),
+      ]),
+      case state.inbox {
+        [] -> html.p([attribute.class("muted")], [html.text("No messages")])
+        messages ->
+          html.ul(
+            [attribute.class("task-list")],
+            list.map(messages, fn(m) {
+              let read_class = case m.read {
+                True -> "muted"
+                False -> ""
+              }
+              html.li([attribute.class("task-item " <> read_class)], [
+                html.span([], [
+                  html.text("From " <> m.from <> ": " <> truncate(m.content, 80)),
+                ]),
+              ])
+            }),
+          )
+      },
+    ]),
+    html.div([], [
+      html.h3([], [
+        html.text("Sent (" <> int.to_string(list.length(state.outbox)) <> ")"),
+      ]),
+      case state.outbox {
+        [] -> html.p([attribute.class("muted")], [html.text("No messages")])
+        messages ->
+          html.ul(
+            [attribute.class("task-list")],
+            list.map(messages, fn(m) {
+              html.li([attribute.class("task-item muted")], [
+                html.span([], [
+                  html.text("To " <> m.to <> ": " <> truncate(m.content, 80)),
+                ]),
+              ])
+            }),
+          )
+      },
+    ]),
+  ])
+}
+
 // ============================================================================
 // Chat view
 // ============================================================================
 
-fn view_chat(model: Model) -> Element(Msg) {
-  let state = active_state(model)
+fn view_chat(model: Model, state: AgentState) -> Element(Msg) {
   html.div([attribute.class("chat")], [
     html.div([attribute.class("chat-log"), attribute.id("chat-log")], [
       html.div([], list.map(state.log, view_log_item)),
@@ -920,7 +1101,7 @@ fn view_thinking_indicator(state: AgentState) -> Element(Msg) {
 }
 
 fn view_input_bar(model: Model) -> Element(Msg) {
-  let disabled = model.connection != Connected
+  let disabled = model.agent_connection != Connected
   html.div([attribute.class("input-bar")], [
     html.input([
       attribute.class("chat-input"),

@@ -6,7 +6,7 @@
 
 Reactive OTP actor that owns the agent state and manages the LLM turn loop. The agent never blocks — LLM calls and tool effects are spawned as async processes that send results back as actor messages. User messages arriving during a turn are queued and processed after the current turn completes.
 
-- **`AgentConfig(agent_id, llm_config, system_prompt)`** — configuration passed at start. `agent_id` identifies the agent within the tree (e.g. `"root"`)
+- **`AgentConfig(agent_id, llm_config, system_prompt, extra_widgets)`** — configuration passed at start. `agent_id` identifies the agent within the tree. `extra_widgets` is a list of pre-built `WidgetHandle`s injected by `AgentTree` (e.g. mailbox, subagent_manager) — this avoids import cycles between agent.gleam and the widget modules
 - **`AgentConfigOverride(model, api_base, system_prompt)`** — partial overrides for child agents (all fields `Option`). API key is always inherited
 - **`merge_config(parent, child_id, override)`** — produces a child `AgentConfig` from a parent config, a child ID, and an override (None fields inherit from parent)
 - **`AgentMessage`** — opaque message type with eleven variants:
@@ -45,7 +45,7 @@ The agent reacts to messages based on its current data rather than following a s
 - `current_reply_to: Option(Subject(TurnResult))` — the reply Subject for the current turn's caller
 - `iteration: Int` — current turn iteration (reset to 0 for each user message)
 
-**Default widget tree:** `build_context` creates a Context with the system prompt, goal, file explorer, and token usage widgets as children, plus the conversation log.
+**Default widget tree:** `build_context` creates a Context with the system prompt, goal, file explorer, and token usage widgets as base children, appends any `extra_widgets` from the config (mailbox, subagent_manager when injected by `AgentTree`), plus the conversation log.
 
 **Subscriber notification:**
 
@@ -57,14 +57,10 @@ During tool dispatch, the agent sends `ToolCallStarted` and `ToolCallCompleted` 
 
 ### `eddie/server`
 
-Mist HTTP and WebSocket server. The server is thin glue between the Lustre SPA frontend and the agent tree. It serves the HTML shell and bundled frontend JS, routes WebSocket connections to specific agents, and provides a REST endpoint for listing available agents.
+Mist HTTP and WebSocket server. The server is thin glue between the Lustre SPA frontend and the agent tree. It serves the HTML shell and bundled frontend JS, and provides two WebSocket channels plus a REST endpoint.
 
 - **`ServerConfig(port)`** — listening port configuration
 - **`start(config, tree)`** — starts mist with an `AgentTree` subject, returns `Result(Started(Supervisor), StartError)`
-
-**WebSocket registry:**
-
-The server creates a `WsRegistry` OTP actor that tracks all connected WebSocket client Subjects. This enables server-wide broadcasts (e.g. `AgentListChanged` when a new agent is spawned). Each WebSocket connection registers on init and unregisters on close.
 
 **Routes:**
 
@@ -72,91 +68,114 @@ The server creates a `WsRegistry` OTP actor that tracks all connected WebSocket 
 |---|---|---|
 | `GET` | `/` | Serves the HTML shell (`<div id="app">` + `<script src="/app.js">`) |
 | `GET` | `/app.js` | Serves the bundled Lustre SPA JS (read from `../frontend/build/app.js` via simplifile) |
-| `GET` | `/agents` | Returns JSON array of `AgentInfo` records (id + label) for all agents in the tree |
-| `GET` | `/ws/<agent_id>` | WebSocket upgrade for a specific agent (looks up agent in tree, returns 404 if not found) |
-| `GET` | `/ws` | WebSocket upgrade for the root agent (backwards compatible) |
+| `GET` | `/agents` | Returns JSON array of `AgentTreeNode` records (rose-tree forest) |
+| `GET` | `/ws/control` | Control WebSocket — tree change events, root agent spawning |
+| `GET` | `/ws/<agent_id>` | Agent WebSocket — per-agent state updates and commands (returns 404 if agent not found) |
 | `*` | `*` | 404 |
 
-**WebSocket protocol:**
+**Control WebSocket (`/ws/control`):**
 
-Each WebSocket connection is a separate BEAM process bound to a specific agent (identified by the URL path). On init, it creates a Subject for state updates (`Subject(String)`), subscribes to the target agent, registers with the `WsRegistry` for broadcasts, and immediately sends the current widget state via `agent.get_current_state` so that the frontend is populated on first load.
+System-level channel, always connected from the frontend's landing page. On init, subscribes to tree change events via `agent_tree.subscribe_tree` and sends the initial `AgentTreeChanged` event. Handles `SpawnRootAgent` commands — generates a UUID server-side, creates the agent with a default label and system prompt via `agent_tree.spawn_root`. The tree broadcasts `AgentTreeChanged` to all control WS subscribers after spawning.
 
-The connection state (`WsState`) holds the agent Subject, the tree Subject, the registry Subject, and the update Subject — giving it access to both per-agent operations and tree-level operations like spawning.
+**Agent WebSocket (`/ws/<agent_id>`):**
 
-*Client → Server messages (JSON over WebSocket):*
-
-The frontend sends `ClientCommand` JSON (defined in `eddie_shared/protocol`). Each command has a `"type"` field. The server parses these via `protocol.client_command_decoder()`:
-
-| Command type | Effect |
-|---|---|
-| `send_user_message` | Calls `agent.send_message` (fire-and-forget) |
-| `spawn_agent` | Calls `agent_tree.spawn_child`, broadcasts `AgentListChanged` to all clients via registry. On failure, sends `AgentSpawnFailed` to the requesting client only |
-| All other commands | Mapped to widget event dispatch via `agent.dispatch_event` |
-
-Turn lifecycle events (`TurnStarted`, `TurnCompleted`) flow through the subscriber mechanism — the server does not need to track turn state separately.
+Per-agent channel, connected only when the user is viewing a specific agent's conversation. On init, subscribes to the agent's state updates and sends the initial state snapshot. Handles `SendUserMessage` and widget event commands, forwarding them to the agent via `agent.send_message` and `agent.dispatch_event`.
 
 *Server → Client messages:*
 
 All server-to-client messages are JSON-encoded arrays of `ServerEvent` objects (defined in `eddie_shared/protocol`). Each event has a `"type"` field identifying the variant. Key event types:
 
-| Event type | Purpose |
-|---|---|
-| `agent_state_snapshot` | Full state snapshot sent on initial connect |
-| `system_prompt_updated` | System prompt text changed |
-| `goal_updated` | Goal set or cleared |
-| `tokens_used` | Token usage for a request |
-| `file_explorer_updated` | Open directories and files changed |
-| `task_created`, `task_status_changed` | Task lifecycle events |
-| `conversation_appended` | New log item (user message, response, tool results) |
-| `tool_call_started`, `tool_call_completed` | Tool call progress during a turn |
-| `turn_started`, `turn_completed` | Turn lifecycle (thinking indicator) |
-| `agent_error` | Unrecoverable agent error |
-| `agent_list_changed` | List of available agents changed (after spawn) |
-| `agent_spawn_failed` | A spawn request failed (sent to requesting client only) |
+| Event type | Channel | Purpose |
+|---|---|---|
+| `agent_tree_changed` | Control | Rose-tree forest of all agents changed |
+| `agent_spawn_failed` | Control | Root agent spawn failed |
+| `agent_state_snapshot` | Agent | Full state snapshot on initial connect |
+| `system_prompt_updated`, `goal_updated` | Agent | Widget state changes |
+| `conversation_appended` | Agent | New log item |
+| `task_created`, `task_status_changed` | Agent | Task lifecycle |
+| `tool_call_started`, `tool_call_completed` | Agent | Tool call progress |
+| `turn_started`, `turn_completed` | Agent | Turn lifecycle (thinking indicator) |
+| `subagents_updated` | Agent | Subagent list changed |
+| `mailbox_updated`, `mail_received`, `mail_sent` | Agent | Mailbox state changes |
+| `child_agent_status_changed` | Agent | Child agent status update |
 
 ### Lustre SPA frontend (`eddie_frontend`)
 
-Single-module Lustre application (`frontend/src/eddie_frontend.gleam`) that renders the chat UI and sidebar panels. Compiled to JavaScript and bundled with esbuild. Supports multiple agents with per-agent state caching and WebSocket switching.
+Two-page Lustre application (`frontend/src/eddie_frontend.gleam`) with a landing page (agent list) and a conversation page (chat UI). Compiled to JavaScript and bundled with esbuild.
 
-- **WebSocket:** uses `lustre_websocket` to connect to `/ws/<agent_id>`. Connection lifecycle is managed with a **generation counter** (`ws_generation`) that increments on each intentional connection change (agent switch, reconnect). All timed messages (`AttemptReconnect`, `CheckConnection`) carry the generation they were created for and are silently ignored when stale — this prevents ghost timers from opening duplicate WebSocket connections. A 3-second `CheckConnection` watchdog retries the connection if still in `Connecting` state with a matching generation. On explicit disconnect (`OnClose`), the handler checks whether the close is stale (either `model.ws` already holds a live socket, or `connection` is `Connecting` from an agent switch) and only triggers reconnection for genuine disconnections. Note: `lustre_websocket`'s `ws.close` FFI returns `undefined` instead of a Lustre `Effect`, so it is wrapped in `effect.from` to avoid crashing `effect.batch`
-- **Multi-agent model:**
-  - `AgentState` — per-agent cached state (goal, tasks, log, directories, files, token records, thinking indicator, active tool calls)
-  - `Model.agents: Dict(String, AgentState)` — cached state per agent
-  - `Model.active_agent: String` — currently selected agent ID
-  - `Model.agent_list: List(AgentInfo)` — available agents, fetched from `GET /agents` on init and updated via `AgentListChanged` events
-- **Agent tab bar:** displays all available agents as tabs in the top bar. Clicking a tab switches the WebSocket connection — the cached state for the target agent is cleared to empty so the initial snapshot from the new WebSocket populates a fresh state rather than appending to stale data. A "+" button opens an inline spawn form (id, label, optional system prompt) that sends a `SpawnAgent` command
-- **Update:** folds all `ServerEvent`s from a WebSocket message into the active agent's state. Model-level events (`AgentListChanged`) are applied separately. One re-render per message batch
-- **View:** top bar (connection status + agent tabs) + main area (sidebar left, chat right) + input bar
-- **Chat view:** user messages, assistant responses with tool call badges, collapsible tool results, thinking indicator with pulsing animation
-- **Sidebar panels:** Goal, Tasks (with status icons and memories), Files (directory tree), Token Usage (totals and request count)
-- **JS FFI:** `setTimeout`, `scrollToBottom`, `fetchJson` (for agent list REST fetch)
+**Page navigation:**
+
+- `AgentListPage` — landing page showing the rose-tree forest of agents. A "+" button sends `SpawnRootAgent` via the control WebSocket. Clicking an agent card navigates to its conversation
+- `AgentConversationPage(agent_id)` — chat UI with sidebar panels. A back button returns to the agent list
+
+**Two WebSocket connections:**
+
+- **Control WS** (`/ws/control`) — always connected. Receives `AgentTreeChanged` events to keep the agent list current. Sends `SpawnRootAgent` commands. Managed with its own generation counter (`control_ws_generation`) and reconnect logic
+- **Agent WS** (`/ws/<agent_id>`) — connected only when on the conversation page. Carries per-agent state events and commands. Closed when navigating back to the list. Managed with a separate generation counter (`agent_ws_generation`). Uses the same watchdog pattern: 3-second `CheckConnection` timer retries if still `Connecting` with a matching generation. Note: `lustre_websocket`'s `ws.close` FFI returns `undefined` instead of a Lustre `Effect`, so it is wrapped in `effect.from` to avoid crashing `effect.batch`
+
+**Model:**
+
+- `Model.page: Page` — current page (`AgentListPage` or `AgentConversationPage(agent_id)`)
+- `Model.agent_tree: List(AgentTreeNode)` — rose-tree forest, updated via `AgentTreeChanged` from control WS
+- `Model.agents: Dict(String, AgentState)` — per-agent cached state
+- `AgentState` — goal, tasks, log, directories, files, token records, thinking indicator, active tool calls, subagents, inbox, outbox
+
+**Agent list page view:** renders each root agent as a card showing label, status badge, agent ID, child count, and nested subtree cards for children. Status badges use `AgentStatus` (idle/running/completed/error).
+
+**Conversation page view:**
+
+- **Top bar:** back button, "Eddie" title, agent ID, connection status
+- **Sidebar panels:** Goal, Tasks, Files, Tokens, Subagents (child agents with status icons), Mailbox (inbox with unread markers, outbox)
+- **Chat view:** user messages, assistant responses with tool call badges, collapsible tool results, thinking indicator
+- **Input bar:** text input and send button, disabled when agent WS is not connected
+
+- **JS FFI:** `setTimeout`, `scrollToBottom`
 - **Theme:** Catppuccin Mocha dark theme via CSS in the HTML shell
 - **Build:** `task frontend:bundle` runs `gleam build` then `esbuild` to produce `frontend/build/app.js`
 
 ### `eddie` (entry point)
 
-Application entry point. Reads configuration from environment variables, creates an `AgentTree` (with the root agent) and the server, then sleeps forever (the BEAM scheduler keeps the actors alive).
+Application entry point. Reads configuration from environment variables, creates an empty `AgentTree`, a `MailboxBroker`, wires the broker into the tree, starts the server, then sleeps forever (the BEAM scheduler keeps the actors alive). No agents exist at startup — they are created by the user from the frontend.
 
 | Env var | Required | Default | Purpose |
 |---|---|---|---|
 | `OPENROUTER_API_KEY` | Yes | — | LLM API key |
 | `OPENROUTER_API_BASE` | No | `https://openrouter.ai/api/v1` | LLM API base URL |
-| `EDDIE_MODEL` | No | `anthropic/claude-sonnet-4` | Model identifier |
+| `EDDIE_MODEL` | No | `x-ai/grok-4.1-fast` | Model identifier |
 | `EDDIE_PORT` | No | `8080` | HTTP listening port |
 
 ### `eddie/agent_tree`
 
-OTP actor that manages hierarchical parent-child agent relationships. Each agent in the tree is an independent OTP actor with its own context and turn loop. The tree itself is an actor so children can be spawned at runtime and looked up by the server without holding a stale reference.
+OTP actor that manages a forest of rose-tree agent hierarchies. Each agent in the tree is an independent OTP actor with its own context and turn loop. The tree starts empty — no agents exist until explicitly spawned.
 
-- **`AgentTreeMessage`** — opaque message type with four variants: `GetRoot`, `GetAgent(id)`, `ListAgents`, `SpawnChild(id, label, override)`
-- **`start(config)` / `start_with_send_fn(config, send_fn)`** — creates a tree with a root agent, returns `Result(Subject(AgentTreeMessage), StartError)`
-- **`root(tree)`** — returns the root agent's Subject (via `process.call`)
-- **`get_agent(tree, id)`** — looks up an agent by ID (`"root"` returns the root, other IDs look up children), returns `Result(Subject(AgentMessage), Nil)`
-- **`list_agents(tree)`** — returns `List(AgentInfo)` with root (always first) and all children
-- **`spawn_child(tree, id, label, override)`** — starts a child agent with `merge_config(root_config, child_id, override)`, returns `Result(Nil, SpawnError)`
-- **`SpawnError`** — `ChildAlreadyExists(id)` | `ChildStartFailed(StartError)`
+- **`AgentTreeMessage`** — opaque message type with variants: `GetAgent(id)`, `GetAgentTree`, `GetChildren(parent_id)`, `GetParent(child_id)`, `SpawnRootAgent(id, label, system_prompt)`, `SpawnChildAgent(id, label, parent_id, goal, initial_message, override)`, `UpdateStatus(agent_id, status)`, `SubscribeTree(subscriber)`, `UnsubscribeTree(subscriber)`, `SetSelf(subject)`, `SetBroker(broker)`
+- **`start(config)` / `start_with_send_fn(config, send_fn)`** — creates an empty tree, sends `SetSelf` so the tree knows its own Subject, returns `Result(Subject(AgentTreeMessage), StartError)`
+- **`get_agent(tree, id)`** — flat lookup by ID, returns `Result(Subject(AgentMessage), Nil)`
+- **`get_tree(tree)`** — returns `List(AgentTreeNode)` (the rose-tree forest, assembled from the flat Dict on demand)
+- **`get_children(tree, parent_id)`** — returns child `List(AgentInfo)`
+- **`get_parent(tree, child_id)`** — returns `Option(String)` parent ID
+- **`spawn_root(tree, id, label, system_prompt)`** — creates a top-level agent with default config plus injected extra widgets (subagent_manager, mailbox)
+- **`spawn_child(tree, id, label, parent_id, goal, initial_message, override)`** — creates a child agent, updates parent's `child_ids`, sends the initial user message to start the child's turn
+- **`update_status(tree, agent_id, status)`** — updates an agent's status and broadcasts `AgentTreeChanged`
+- **`subscribe_tree` / `unsubscribe_tree`** — subscribe to tree change broadcasts (for control WebSocket)
+- **`set_broker(tree, broker)`** — injects the mailbox broker Subject (called once at startup)
+- **`SpawnError`** — `AgentAlreadyExists(id)` | `ParentNotFound(id)` | `AgentStartFailed(StartError)`
 
-Children are stored as `Dict(String, #(Subject(AgentMessage), String))` (subject + label). They share the parent's `send_fn` (HTTP sender) and API key. The tree does not use OTP supervision — each child is a standalone actor started with `agent.start_with_send_fn`. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
+Agents are stored as `Dict(String, AgentEntry)` where `AgentEntry` holds `subject`, `label`, `parent_id`, `child_ids`, and `status`. The tree builds extra widgets (subagent_manager, mailbox) via closures at spawn time to avoid import cycles (see [trade-off card](../decisions/tradeoffs/14-closure-based-widget-injection.md)). The tree does not use OTP supervision — each agent is a standalone actor. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
+
+### `eddie/mailbox_broker`
+
+Central OTP actor for routing free-form text messages between agents. All agents share a single broker instance.
+
+- **State:** `mailboxes` (agent_id → inbox), `outboxes` (agent_id → sent), `subscribers` (agent_id → notification subscribers), `next_id` counter
+- **`send_mail(broker, from, to, content)`** — creates a `MailMessage` with unique ID and timestamp, appends to recipient's inbox and sender's outbox, notifies subscribers
+- **`read_mail(broker, agent_id)`** — returns all inbox messages in chronological order
+- **`read_unread(broker, agent_id)`** — returns only unread messages
+- **`mark_read(broker, agent_id, message_id)`** — marks a message as read
+- **`get_outbox(broker, agent_id)`** — returns sent messages
+- **`subscribe_mailbox` / `unsubscribe_mailbox`** — subscribe to new mail notifications for a specific agent
+
+The broker is started once in `eddie.gleam` and injected into the `AgentTree` via `set_broker`. Each agent's mailbox widget communicates with the broker via `CmdEffect` closures.
 
 ## Widgets (Phase 2 + Phase 6)
 
@@ -271,6 +290,33 @@ Display-only token tracking. No LLM tools or messages — receives data via `wid
 - **Views:** `view_messages` returns `[]`, `view_tools` returns `[]`; `view_state` produces `[TokensUsed(input, output)]` for each record in chronological order
 - **Integration:** the agent's `record_token_usage` function finds the token_usage widget by ID in the children list and sends a `UsageRecorded` message via `widget.send` after each parsed LLM response
 - **Factory:** `create()`
+
+### `eddie/widgets/subagent_manager`
+
+Gives agents the ability to spawn child agents autonomously. Protocol-free. Uses closure-based `SpawnFn` and `ListChildrenFn` to avoid import cycles with `agent_tree`.
+
+- **Model:** `SubagentManagerModel(agent_id, spawn_fn, list_children_fn, children, next_child_number)` — `children` is `List(SubagentInfo)` tracking spawned children locally
+- **Messages:** `SpawnSubagent(label, goal, initial_message)`, `ListSubagents`, `SpawnResult(result, info)`, `ChildrenListed(children)`
+- **LLM tools:** `spawn_subagent` (label, goal, initial_message — generates UUID, calls spawn closure via `CmdEffect`) and `list_subagents` (queries tree via `CmdEffect`)
+- **Views:** `view_messages` shows a summary of spawned subagents; `view_state` produces `SubagentsUpdated(children)` with `AgentInfo` records
+- **Factory:** `create(agent_id, spawn_fn, list_children_fn)` — closures are constructed by `agent_tree.build_extra_widgets`
+
+The system prompt for spawned children includes the goal and instructs them to use `send_to_parent` when done.
+
+### `eddie/widgets/mailbox`
+
+Parent-child communication via free-form messages through the central mailbox broker. Protocol-free. Tools are dynamic based on the agent's position in the tree.
+
+- **Model:** `MailboxModel(agent_id, parent_id, child_ids, inbox, outbox, broker)` — `broker` is a `Subject(MailboxBrokerMessage)`
+- **Messages:** `SendToParent(content, initiator)`, `SendToChild(child_id, content, initiator)`, `ReadMailbox(initiator)`, `CheckUnread(initiator)`, `SendResult(result)`, `InboxLoaded(messages)`, `UnreadLoaded(messages)`
+- **LLM tools (conditional):**
+  - Has parent: `send_to_parent(message)`
+  - Has children: `send_to_child(child_id, message)`
+  - Always: `read_mailbox`, `check_unread`
+- **Views:** `view_messages` shows mailbox summary (unread count, parent, children); `view_state` produces `MailboxUpdated(inbox, outbox)`
+- **Factory:** `create(agent_id, parent_id, child_ids, broker)`
+
+All broker communication uses `CmdEffect` — the `perform` closure calls `mailbox_broker.send_mail` / `read_mail` / `read_unread` directly (these are `process.call` to the broker actor).
 
 ## Structured Output (Phase 5)
 

@@ -33,4 +33,6 @@
   - [Simplifile sync IO in CmdEffect](./decisions/tradeoffs/11-simplifile-sync-io-in-cmdeffect.md)
   - [Client-side markdown rendering](./decisions/tradeoffs/12-client-side-markdown-rendering.md)
   - [Async agent with spawned effects](./decisions/tradeoffs/13-async-agent-with-spawned-effects.md)
+  - [Closure-based widget injection](./decisions/tradeoffs/14-closure-based-widget-injection.md)
+  - [Central mailbox broker](./decisions/tradeoffs/15-central-mailbox-broker.md)
 - [Technical Debt](./decisions/tech-debt.md)

@@ -7,15 +7,17 @@ Eddie is a Gleam reimplementation of Calipso — an Elm-architecture widget syst
 ```mermaid
 %%{init: {'flowchart': {'curve': 'natural'}}}%%
 flowchart TB
-    User((User)) <--> Browser["Browser"]
-    Browser <-->|WebSocket| Server["Mist Server"]
-    Server ==>|spawns| TurnProc["Turn Process"]
-    TurnProc --> Agent["Agent Actor"]
-    Server -->|subscribe| Agent
+    User((User)) <--> Browser["Browser (Lustre SPA)"]
+    Browser <-->|Control WS| Server["Mist Server"]
+    Browser <-->|Agent WS| Server
+    Server --> AgentTree["Agent Tree"]
+    AgentTree ==>|spawns| Agent["Agent Actor"]
     Agent <--> Context["Context Compositor"]
     Context <--> Widgets["Widget Tree"]
     Agent -->|http.send| LLM["LLM API"]
     Agent -.->|JSON events| Server
+    AgentTree <--> Broker["Mailbox Broker"]
+    Broker <-.->|mail| Agent
 ```
 
 The **agent loop** is the core cycle:
@@ -28,6 +30,11 @@ The **agent loop** is the core cycle:
 6. When the LLM responds with text only, the turn completes
 7. After every state mutation, the agent computes `changed_state` and pushes JSON-encoded `ServerEvent` lists to all subscribed WebSocket connections
 8. The Lustre SPA decodes `ServerEvent` arrays and updates its model, rendering the chat UI and sidebar panels
+
+The **two WebSocket channels** serve different purposes:
+
+- `/ws/control` — always connected, receives `AgentTreeChanged` events, sends `SpawnRootAgent` commands
+- `/ws/<agent_id>` — connected only when viewing a specific agent's conversation, carries per-agent state events and commands
 
 ## Key differences from Calipso
 
@@ -51,12 +58,20 @@ The agent's context is composed from a tree of widgets, orchestrated by the **Co
 - **FileExplorer** — filesystem navigation using `CmdEffect` for IO operations
 - **TokenUsage** — display-only widget tracking input/output tokens per LLM request
 - **ConversationLog** — manages task-partitioned conversation history, memory management, and the task protocol that governs when non-task tools can be called
+- **SubagentManager** — gives agents the `spawn_subagent` and `list_subagents` tools (injected by `AgentTree` at spawn time)
+- **Mailbox** — parent-child communication via free-form messages through a central broker (injected by `AgentTree` at spawn time)
 
-## Hierarchical agents
+## Rose-tree agent forest
 
-Eddie supports multi-agent hierarchies through `AgentTree`, itself an OTP actor that manages a root agent and dynamically spawned children. Each agent has an `agent_id` and a human-readable label. Children inherit the parent's config with optional overrides (model, API base, system prompt); API keys are always inherited.
+Eddie supports a **list of rose-trees** of agents — arbitrary-depth nesting with multiple independent root agents. No agent exists at startup; the user creates root agents from the landing page via a "+" button.
 
-The server routes WebSocket connections per agent (`/ws/<agent_id>`), and a `GET /agents` endpoint returns the list of available agents as `AgentInfo` records. The Lustre SPA displays an agent tab bar for switching between agents and an inline form for spawning new ones at runtime via the `SpawnAgent` client command.
+`AgentTree` is an OTP actor that manages a flat `Dict(String, AgentEntry)` of all agents, with parent-child relationships tracked via `parent_id` and `child_ids` fields. A `build_tree` function assembles the rose-tree forest on demand for the frontend.
+
+Root agents are created by the user through the control WebSocket (`SpawnRootAgent`). Child agents are spawned by parent agents using the `spawn_subagent` tool, which generates a UUID, creates the child with a goal and initial message, and starts the child's turn loop immediately. Children run in the background and communicate with their parent via the mailbox widget.
+
+The `AgentTree` injects `SubagentManager` and `Mailbox` widget handles into each agent's `extra_widgets` at spawn time, using closures to avoid import cycles between `agent_tree` and the widget modules.
+
+The **Mailbox Broker** is a separate OTP actor that routes free-form text messages between agents. Each agent's mailbox widget communicates with the broker via `CmdEffect`. The broker stores inboxes and outboxes, tracks read/unread state, and notifies subscribers when new mail arrives.
 
 ## Context compositor and LLM bridge
 
