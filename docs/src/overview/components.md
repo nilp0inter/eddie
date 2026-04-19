@@ -116,7 +116,7 @@ All server-to-client messages are JSON-encoded arrays of `ServerEvent` objects (
 
 Single-module Lustre application (`frontend/src/eddie_frontend.gleam`) that renders the chat UI and sidebar panels. Compiled to JavaScript and bundled with esbuild. Supports multiple agents with per-agent state caching and WebSocket switching.
 
-- **WebSocket:** uses `lustre_websocket` to connect to `/ws/<agent_id>`, auto-reconnects on disconnect. Switching agents closes the current WebSocket and opens a new one
+- **WebSocket:** uses `lustre_websocket` to connect to `/ws/<agent_id>`. A 3-second connection watchdog timer retries the WebSocket if the connection has not opened (`Connecting` state persists). This handles silent connection failures where neither `onopen` nor `onclose` fires. On explicit disconnect (`OnClose`), reconnects after a 2-second delay. On `InvalidUrl`, retries after 2 seconds (previously a dead end). Switching agents closes the current WebSocket and opens a new one with its own watchdog timer
 - **Multi-agent model:**
   - `AgentState` — per-agent cached state (goal, tasks, log, directories, files, token records, thinking indicator, active tool calls)
   - `Model.agents: Dict(String, AgentState)` — cached state per agent

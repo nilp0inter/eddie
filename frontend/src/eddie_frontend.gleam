@@ -145,6 +145,7 @@ type Msg {
   SubmitMessage
   SetActivePanel(Option(Panel))
   AttemptReconnect
+  CheckConnection
   SwitchAgent(String)
   AgentListReceived(String)
   ToggleSpawnForm
@@ -164,6 +165,7 @@ fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     effect.batch([
       ws.init("/ws/root", WsEvent),
       fetch_agent_list(),
+      delay_effect(CheckConnection, 3000),
     ]),
   )
 }
@@ -198,14 +200,29 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     )
 
     WsEvent(ws.InvalidUrl) -> #(
-      Model(..model, connection: Disconnected),
-      effect.none(),
+      Model(..model, connection: Connecting),
+      delay_effect(AttemptReconnect, 2000),
     )
 
     AttemptReconnect -> #(
       Model(..model, connection: Connecting),
-      ws.init("/ws/" <> model.active_agent, WsEvent),
+      effect.batch([
+        ws.init("/ws/" <> model.active_agent, WsEvent),
+        delay_effect(CheckConnection, 3000),
+      ]),
     )
+
+    // Connection watchdog: if still Connecting after the timer, retry
+    CheckConnection -> case model.connection {
+      Connecting -> #(
+        model,
+        effect.batch([
+          ws.init("/ws/" <> model.active_agent, WsEvent),
+          delay_effect(CheckConnection, 3000),
+        ]),
+      )
+      _ -> #(model, effect.none())
+    }
 
     UpdateInput(text) -> #(Model(..model, chat_input: text), effect.none())
 
@@ -250,6 +267,7 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             effect.batch([
               close_effect,
               ws.init("/ws/" <> agent_id, WsEvent),
+              delay_effect(CheckConnection, 3000),
             ]),
           )
         }
