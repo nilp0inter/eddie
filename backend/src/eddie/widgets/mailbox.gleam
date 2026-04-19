@@ -5,8 +5,10 @@
 ///
 /// Tools exposed depend on the agent's position in the tree:
 /// - Has parent: send_to_parent
-/// - Has children: send_to_child
-/// - Always: read_mailbox, check_unread
+/// - Always: send_to_child, read_mailbox, check_unread
+///
+/// The send_to_child tool is always available — child validation happens
+/// at call time via a list_children_fn closure that queries the live tree.
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/int
@@ -21,6 +23,7 @@ import eddie/coerce
 import eddie/mailbox_broker.{type MailboxBrokerMessage}
 import eddie/tool.{type ToolDefinition}
 import eddie/widget.{type WidgetHandle}
+import eddie_shared/agent_info.{type AgentInfo}
 import eddie_shared/initiator.{type Initiator, LLM, UI}
 import eddie_shared/mailbox.{type MailMessage}
 import eddie_shared/message.{type Message}
@@ -32,11 +35,16 @@ import gleam/erlang/process.{type Subject}
 // Model
 // ============================================================================
 
+/// Function that returns the current list of children for this agent.
+/// Queries the agent tree at call time for a live view.
+pub type ListChildrenFn =
+  fn() -> List(AgentInfo)
+
 pub type MailboxModel {
   MailboxModel(
     agent_id: String,
     parent_id: Option(String),
-    child_ids: List(String),
+    list_children_fn: ListChildrenFn,
     inbox: List(MailMessage),
     outbox: List(MailMessage),
     broker: Subject(MailboxBrokerMessage),
@@ -57,6 +65,7 @@ pub type MailboxMsg {
   SendResult(result: Result(MailMessage, String))
   InboxLoaded(messages: List(MailMessage))
   UnreadLoaded(messages: List(MailMessage))
+  ChildrenQueried(children: List(AgentInfo), child_id: String, content: String)
 }
 
 // ============================================================================
@@ -97,11 +106,42 @@ fn update(
     }
 
     SendToChild(child_id, content, _initiator) -> {
-      let is_valid = list.contains(model.child_ids, child_id)
+      // Query children from the tree at call time (via CmdEffect)
+      // to validate the child_id against the live tree state
+      let list_fn = model.list_children_fn
+      #(
+        model,
+        cmd.CmdEffect(
+          perform: fn() {
+            coerce.unsafe_coerce(
+              ChildrenQueried(
+                children: list_fn(),
+                child_id: child_id,
+                content: content,
+              ),
+            )
+          },
+          to_msg: coerce.unsafe_coerce,
+        ),
+      )
+    }
+
+    ChildrenQueried(children, child_id, content) -> {
+      let is_valid = list.any(children, fn(c) { c.id == child_id })
       case is_valid {
         False -> #(
           model,
-          cmd.CmdToolResult("Error: unknown child agent '" <> child_id <> "'"),
+          cmd.CmdToolResult(
+            "Error: unknown child agent '"
+            <> child_id
+            <> "'. Known children: "
+            <> case children {
+              [] -> "none"
+              _ ->
+                list.map(children, fn(c) { c.id })
+                |> string.join(", ")
+            },
+          ),
         )
         True -> {
           let broker = model.broker
@@ -197,7 +237,6 @@ fn update(
           <> "):\n"
           <> format_message_list(messages)
       }
-      // Update inbox with these (mark rest as read effectively)
       #(model, cmd.CmdToolResult(text))
     }
   }
@@ -221,11 +260,7 @@ fn view_messages(model: MailboxModel) -> List(Message) {
     None -> "Parent: none (root agent)"
     Some(pid) -> "Parent: " <> pid
   }
-  let children_line = case model.child_ids {
-    [] -> "Children: none"
-    ids -> "Children: " <> string.join(ids, ", ")
-  }
-  let text = string.join([header, status, parent_line, children_line], "\n")
+  let text = string.join([header, status, parent_line], "\n")
   [message.Request(parts: [message.UserPart(text)])]
 }
 
@@ -262,47 +297,41 @@ fn view_tools(model: MailboxModel) -> List(ToolDefinition) {
     }
   }
 
-  let child_tools = case model.child_ids {
-    [] -> []
-    _ -> {
-      let assert Ok(t) =
-        tool.new(
-          name: "send_to_child",
-          description: "Send a message to one of your child agents.",
-          parameters_json: json.object([
-            #("type", json.string("object")),
+  let assert Ok(child_tool) =
+    tool.new(
+      name: "send_to_child",
+      description: "Send a message to one of your child agents by ID. Use list_subagents first to see available children.",
+      parameters_json: json.object([
+        #("type", json.string("object")),
+        #(
+          "properties",
+          json.object([
             #(
-              "properties",
+              "child_id",
               json.object([
+                #("type", json.string("string")),
                 #(
-                  "child_id",
-                  json.object([
-                    #("type", json.string("string")),
-                    #(
-                      "description",
-                      json.string("The ID of the child agent to message."),
-                    ),
-                  ]),
-                ),
-                #(
-                  "message",
-                  json.object([
-                    #("type", json.string("string")),
-                    #(
-                      "description",
-                      json.string("The message content to send."),
-                    ),
-                  ]),
+                  "description",
+                  json.string("The ID of the child agent to message."),
                 ),
               ]),
             ),
-            #("required", json.array(["child_id", "message"], json.string)),
-            #("additionalProperties", json.bool(False)),
+            #(
+              "message",
+              json.object([
+                #("type", json.string("string")),
+                #(
+                  "description",
+                  json.string("The message content to send."),
+                ),
+              ]),
+            ),
           ]),
-        )
-      [t]
-    }
-  }
+        ),
+        #("required", json.array(["child_id", "message"], json.string)),
+        #("additionalProperties", json.bool(False)),
+      ]),
+    )
 
   let assert Ok(read_tool) =
     tool.new(
@@ -326,7 +355,7 @@ fn view_tools(model: MailboxModel) -> List(ToolDefinition) {
       ]),
     )
 
-  list.flatten([parent_tools, child_tools, [read_tool, unread_tool]])
+  list.flatten([parent_tools, [child_tool, read_tool, unread_tool]])
 }
 
 fn view_state(model: MailboxModel) -> List(ServerEvent) {
@@ -436,16 +465,18 @@ fn format_message_list(messages: List(MailMessage)) -> String {
 pub fn create(
   agent_id agent_id: String,
   parent_id parent_id: Option(String),
-  child_ids child_ids: List(String),
+  list_children_fn list_children_fn: ListChildrenFn,
   broker broker: Subject(MailboxBrokerMessage),
 ) -> WidgetHandle {
-  let all_tools = ["read_mailbox", "check_unread", "send_to_parent", "send_to_child"]
+  let all_tools = [
+    "read_mailbox", "check_unread", "send_to_parent", "send_to_child",
+  ]
   widget.create(widget.WidgetConfig(
     id: "mailbox",
     model: MailboxModel(
       agent_id: agent_id,
       parent_id: parent_id,
-      child_ids: child_ids,
+      list_children_fn: list_children_fn,
       inbox: [],
       outbox: [],
       broker: broker,
@@ -459,10 +490,4 @@ pub fn create(
     frontend_tools: set.from_list(all_tools),
     protocol_free_tools: set.from_list(all_tools),
   ))
-}
-
-/// Add a child ID to the mailbox widget's child_ids list.
-/// Returns the updated model (for use when a child is spawned at runtime).
-pub fn add_child(model: MailboxModel, child_id: String) -> MailboxModel {
-  MailboxModel(..model, child_ids: list.append(model.child_ids, [child_id]))
 }

@@ -382,16 +382,31 @@ fn build_extra_widgets(
     }
     None -> []
   }
-  let mailbox_widgets = case broker {
-    Some(b) -> [
-      eddie_mailbox.create(
-        agent_id: agent_id,
-        parent_id: parent_id,
-        child_ids: [],
-        broker: b,
-      ),
-    ]
-    None -> []
+  let mailbox_widgets = case broker, tree_self {
+    Some(b), Some(tree) -> {
+      let aid = agent_id
+      let list_fn = fn() { get_children(tree: tree, parent_id: aid) }
+      [
+        eddie_mailbox.create(
+          agent_id: agent_id,
+          parent_id: parent_id,
+          list_children_fn: list_fn,
+          broker: b,
+        ),
+      ]
+    }
+    Some(b), None -> {
+      let list_fn = fn() { [] }
+      [
+        eddie_mailbox.create(
+          agent_id: agent_id,
+          parent_id: parent_id,
+          list_children_fn: list_fn,
+          broker: b,
+        ),
+      ]
+    }
+    _, _ -> []
   }
   list.append(subagent_widgets, mailbox_widgets)
 }

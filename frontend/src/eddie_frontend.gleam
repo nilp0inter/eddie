@@ -344,6 +344,16 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
     // -- Navigation ---------------------------------------------------------
     NavigateToAgent(agent_id) -> {
+      // Close existing agent WS if open (prevents stale events from
+      // a previous agent being folded into the new agent's state)
+      let close_effect = case model.agent_ws {
+        Some(socket) ->
+          effect.from(fn(_dispatch) {
+            ws.close(socket)
+            Nil
+          })
+        None -> effect.none()
+      }
       let new_gen = model.agent_ws_generation + 1
       let new_model =
         Model(
@@ -358,6 +368,7 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       #(
         new_model,
         effect.batch([
+          close_effect,
           ws.init("/ws/" <> agent_id, AgentWsEvent),
           delay_effect(AgentCheckConnection(new_gen), 3000),
         ]),
@@ -672,7 +683,9 @@ fn view_agent_card(node: AgentTreeNode) -> Element(Msg) {
   html.div(
     [
       attribute.class("agent-card"),
-      event.on_click(NavigateToAgent(info.id)),
+      // stop_propagation prevents clicks on nested child cards from
+      // also triggering the parent card's NavigateToAgent handler
+      event.stop_propagation(event.on_click(NavigateToAgent(info.id))),
     ],
     [
       html.div([attribute.class("agent-card-header")], [
