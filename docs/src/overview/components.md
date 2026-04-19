@@ -49,7 +49,9 @@ The agent reacts to messages based on its current data rather than following a s
 
 **Subscriber notification:**
 
-After each state mutation (user message added, response recorded, tool calls dispatched, tool results recorded), the agent computes `context.changed_state(old, new)` — which compares each widget's `view_state` output using structural equality — and sends the resulting `ServerEvent` list as a JSON-encoded string to all subscriber Subjects. This is a fire-and-forget push — subscribers are WebSocket handler processes that forward the JSON to the browser.
+After each state mutation (user message added, response recorded, tool calls dispatched, tool results recorded), the agent computes `context.changed_state(old, new)` and sends the resulting `ServerEvent` list as a JSON-encoded string to all subscriber Subjects. This is a fire-and-forget push — subscribers are WebSocket handler processes that forward the JSON to the browser.
+
+`changed_state` uses delta detection: for each widget, it compares the old and new `view_state` output using structural equality. If a widget's state changed and the old events are a prefix of the new events (append-only widgets like the conversation log), only the newly appended tail is returned — avoiding re-sending the full conversation history on every mutation. For replacement-style widgets (like the goal or system prompt), the full new events are returned when they differ.
 
 During tool dispatch, the agent sends `ToolCallStarted` and `ToolCallCompleted` `ServerEvent`s to subscribers, giving visibility into the agent's actions during a turn. `TurnStarted` and `TurnCompleted` are also broadcast through the subscriber mechanism. All notifications use the same JSON-encoded `ServerEvent` list format defined in `eddie_shared/protocol`.
 
@@ -116,13 +118,13 @@ All server-to-client messages are JSON-encoded arrays of `ServerEvent` objects (
 
 Single-module Lustre application (`frontend/src/eddie_frontend.gleam`) that renders the chat UI and sidebar panels. Compiled to JavaScript and bundled with esbuild. Supports multiple agents with per-agent state caching and WebSocket switching.
 
-- **WebSocket:** uses `lustre_websocket` to connect to `/ws/<agent_id>`. A 3-second connection watchdog timer retries the WebSocket if the connection has not opened (`Connecting` state persists). This handles silent connection failures where neither `onopen` nor `onclose` fires. On explicit disconnect (`OnClose`), reconnects after a 2-second delay. On `InvalidUrl`, retries after 2 seconds (previously a dead end). Switching agents closes the current WebSocket and opens a new one with its own watchdog timer
+- **WebSocket:** uses `lustre_websocket` to connect to `/ws/<agent_id>`. Connection lifecycle is managed with a **generation counter** (`ws_generation`) that increments on each intentional connection change (agent switch, reconnect). All timed messages (`AttemptReconnect`, `CheckConnection`) carry the generation they were created for and are silently ignored when stale — this prevents ghost timers from opening duplicate WebSocket connections. A 3-second `CheckConnection` watchdog retries the connection if still in `Connecting` state with a matching generation. On explicit disconnect (`OnClose`), the handler checks whether the close is stale (either `model.ws` already holds a live socket, or `connection` is `Connecting` from an agent switch) and only triggers reconnection for genuine disconnections. Note: `lustre_websocket`'s `ws.close` FFI returns `undefined` instead of a Lustre `Effect`, so it is wrapped in `effect.from` to avoid crashing `effect.batch`
 - **Multi-agent model:**
   - `AgentState` — per-agent cached state (goal, tasks, log, directories, files, token records, thinking indicator, active tool calls)
   - `Model.agents: Dict(String, AgentState)` — cached state per agent
   - `Model.active_agent: String` — currently selected agent ID
   - `Model.agent_list: List(AgentInfo)` — available agents, fetched from `GET /agents` on init and updated via `AgentListChanged` events
-- **Agent tab bar:** displays all available agents as tabs in the top bar. Clicking a tab switches the WebSocket connection and renders that agent's cached state. A "+" button opens an inline spawn form (id, label, optional system prompt) that sends a `SpawnAgent` command
+- **Agent tab bar:** displays all available agents as tabs in the top bar. Clicking a tab switches the WebSocket connection — the cached state for the target agent is cleared to empty so the initial snapshot from the new WebSocket populates a fresh state rather than appending to stale data. A "+" button opens an inline spawn form (id, label, optional system prompt) that sends a `SpawnAgent` command
 - **Update:** folds all `ServerEvent`s from a WebSocket message into the active agent's state. Model-level events (`AgentListChanged`) are applied separately. One re-render per message batch
 - **View:** top bar (connection status + agent tabs) + main area (sidebar left, chat right) + input bar
 - **Chat view:** user messages, assistant responses with tool call badges, collapsible tool results, thinking indicator with pulsing animation
@@ -314,7 +316,7 @@ The root compositor — the glue between widgets and the agent loop. Holds a sys
 - **`replace_widget(context, owner_id, handle)`** — replaces a widget handle by owner ID. Used by the agent to insert updated handles after async effects complete
 - **`handle_widget_event`** — dispatches browser UI events to all widgets (no protocol enforcement)
 - **`current_state(context)`** — returns the current state events for all widgets as a flat `List(ServerEvent)` (used for initial WebSocket connect)
-- **`changed_state(old, new)`** — compares each widget's `view_state` output using structural equality, returns events from widgets whose state differs
+- **`changed_state(old, new)`** — compares each widget's `view_state` output using structural equality. For append-only widgets (where old events are a prefix of new events), returns only the newly appended tail. For replacement-style widgets, returns the full new events when they differ
 
 The conversation log is stored as a typed `ConversationLog` (not a `WidgetHandle`) so Context can access protocol checking and the owning task ID directly. See [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md) for the rationale.
 

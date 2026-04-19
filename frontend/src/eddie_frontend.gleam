@@ -98,6 +98,11 @@ type Model {
   Model(
     ws: Option(ws.WebSocket),
     connection: ConnectionStatus,
+    /// Monotonically increasing counter. Incremented each time we
+    /// intentionally start a new connection (init, switch, reconnect).
+    /// Timers (CheckConnection, AttemptReconnect) carry the generation
+    /// they were created for and are ignored when stale.
+    ws_generation: Int,
     active_agent: String,
     agent_list: List(AgentInfo),
     agents: Dict(String, AgentState),
@@ -112,6 +117,7 @@ fn empty_model() -> Model {
   Model(
     ws: None,
     connection: Connecting,
+    ws_generation: 0,
     active_agent: "root",
     agent_list: [AgentInfo(id: "root", label: "Root")],
     agents: dict.from_list([#("root", empty_agent_state())]),
@@ -144,8 +150,10 @@ type Msg {
   UpdateInput(String)
   SubmitMessage
   SetActivePanel(Option(Panel))
-  AttemptReconnect
-  CheckConnection
+  /// Carries the ws_generation it was scheduled for.
+  AttemptReconnect(Int)
+  /// Carries the ws_generation it was scheduled for.
+  CheckConnection(Int)
   SwitchAgent(String)
   AgentListReceived(String)
   ToggleSpawnForm
@@ -160,12 +168,13 @@ type Msg {
 // ============================================================================
 
 fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
+  let model = empty_model()
   #(
-    empty_model(),
+    model,
     effect.batch([
       ws.init("/ws/root", WsEvent),
       fetch_agent_list(),
-      delay_effect(CheckConnection, 3000),
+      delay_effect(CheckConnection(model.ws_generation), 3000),
     ]),
   )
 }
@@ -194,35 +203,65 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
     WsEvent(ws.OnBinaryMessage(_)) -> #(model, effect.none())
 
-    WsEvent(ws.OnClose(_)) -> #(
-      Model(..model, ws: None, connection: Disconnected),
-      delay_effect(AttemptReconnect, 2000),
-    )
+    WsEvent(ws.OnClose(_)) ->
+      case model.ws {
+        // We already have a live socket — this close is from an old one
+        Some(_) -> #(model, effect.none())
+        None ->
+          case model.connection {
+            // Intentional close during agent switch — ignore
+            Connecting -> #(model, effect.none())
+            // Genuine disconnection
+            _ -> {
+              let gen = model.ws_generation
+              #(
+                Model(..model, connection: Disconnected),
+                delay_effect(AttemptReconnect(gen), 2000),
+              )
+            }
+          }
+      }
 
-    WsEvent(ws.InvalidUrl) -> #(
-      Model(..model, connection: Connecting),
-      delay_effect(AttemptReconnect, 2000),
-    )
+    WsEvent(ws.InvalidUrl) -> {
+      let gen = model.ws_generation
+      #(
+        Model(..model, connection: Connecting),
+        delay_effect(AttemptReconnect(gen), 2000),
+      )
+    }
 
-    AttemptReconnect -> #(
-      Model(..model, connection: Connecting),
-      effect.batch([
-        ws.init("/ws/" <> model.active_agent, WsEvent),
-        delay_effect(CheckConnection, 3000),
-      ]),
-    )
+    AttemptReconnect(gen) ->
+      case gen == model.ws_generation {
+        // Stale timer from a previous connection attempt — ignore
+        False -> #(model, effect.none())
+        True -> {
+          let new_gen = model.ws_generation + 1
+          #(
+            Model(..model, connection: Connecting, ws_generation: new_gen),
+            effect.batch([
+              ws.init("/ws/" <> model.active_agent, WsEvent),
+              delay_effect(CheckConnection(new_gen), 3000),
+            ]),
+          )
+        }
+      }
 
     // Connection watchdog: if still Connecting after the timer, retry
-    CheckConnection -> case model.connection {
-      Connecting -> #(
-        model,
-        effect.batch([
-          ws.init("/ws/" <> model.active_agent, WsEvent),
-          delay_effect(CheckConnection, 3000),
-        ]),
-      )
-      _ -> #(model, effect.none())
-    }
+    CheckConnection(gen) ->
+      case gen == model.ws_generation, model.connection {
+        // Stale timer — ignore
+        False, _ -> #(model, effect.none())
+        // Connection already established — ignore
+        _, Connected -> #(model, effect.none())
+        // Still connecting with current generation — retry
+        True, _ -> #(
+          model,
+          effect.batch([
+            ws.init("/ws/" <> model.active_agent, WsEvent),
+            delay_effect(CheckConnection(gen), 3000),
+          ]),
+        )
+      }
 
     UpdateInput(text) -> #(Model(..model, chat_input: text), effect.none())
 
@@ -250,24 +289,35 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case agent_id == model.active_agent {
         True -> #(model, effect.none())
         False -> {
-          // Close current WebSocket, open new one for the selected agent
+          // Close current WebSocket, open new one for the selected agent.
+          // ws.close FFI returns undefined instead of a Lustre Effect,
+          // so we wrap it to avoid crashing effect.batch.
           let close_effect = case model.ws {
-            Some(socket) -> ws.close(socket)
+            Some(socket) ->
+              effect.from(fn(_dispatch) {
+                ws.close(socket)
+                Nil
+              })
             None -> effect.none()
           }
+          // Bump generation so stale timers from the old connection are
+          // ignored, and clear cached state for the target agent.
+          let new_gen = model.ws_generation + 1
           let new_model =
             Model(
               ..model,
               active_agent: agent_id,
               ws: None,
               connection: Connecting,
+              ws_generation: new_gen,
+              agents: dict.insert(model.agents, agent_id, empty_agent_state()),
             )
           #(
             new_model,
             effect.batch([
               close_effect,
               ws.init("/ws/" <> agent_id, WsEvent),
-              delay_effect(CheckConnection, 3000),
+              delay_effect(CheckConnection(new_gen), 3000),
             ]),
           )
         }

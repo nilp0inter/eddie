@@ -4,7 +4,8 @@ Run `task --list` to see all available tasks. Key commands:
 
 | Command | Purpose |
 |---|---|
-| `task build:local` | Build all packages (shared, backend, frontend) |
+| `task start` | Build everything and run the server |
+| `task build:local` | Build all packages (shared, backend, frontend + bundle) |
 | `task backend:run` | Build backend + bundle frontend, then run the server |
 | `task test:unit` | Run all tests (shared + backend) |
 | `task format` | Auto-format all packages |

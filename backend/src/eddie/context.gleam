@@ -212,7 +212,10 @@ pub fn current_state(context context: Context) -> List(ServerEvent) {
 }
 
 /// Detect which widgets changed their state between two context snapshots.
-/// Returns events from widgets whose state differs.
+/// Returns only the new/changed events. If the old events are a prefix of
+/// the new events (append-only widget like conversation log), returns only
+/// the appended tail. Otherwise returns the full new events (replacement
+/// widget like counter).
 pub fn changed_state(old old: Context, new new: Context) -> List(ServerEvent) {
   let old_entries = all_widget_state_entries(old)
   let new_entries = all_widget_state_entries(new)
@@ -222,7 +225,22 @@ pub fn changed_state(old old: Context, new new: Context) -> List(ServerEvent) {
     let #(old_entry, new_entry) = pair
     case old_entry.events == new_entry.events {
       True -> []
-      False -> new_entry.events
+      False -> {
+        // If the old events are a prefix of the new events, only return
+        // the newly appended items to avoid re-sending the full state
+        let old_len = list.length(old_entry.events)
+        let new_len = list.length(new_entry.events)
+        case new_len > old_len {
+          True -> {
+            let prefix = list.take(new_entry.events, old_len)
+            case prefix == old_entry.events {
+              True -> list.drop(new_entry.events, old_len)
+              False -> new_entry.events
+            }
+          }
+          False -> new_entry.events
+        }
+      }
     }
   })
 }

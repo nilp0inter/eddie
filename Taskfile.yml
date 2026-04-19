@@ -113,12 +113,6 @@ tasks:
       - frontend:build
     cmds:
       - esbuild entrypoint.mjs --bundle --outfile=build/app.js --format=iife
-    sources:
-      - src/**/*.gleam
-      - gleam.toml
-      - entrypoint.mjs
-    generates:
-      - build/app.js
 
   backend:run:
     desc: Run the backend server
@@ -129,12 +123,17 @@ tasks:
     cmds:
       - gleam run
 
+  start:
+    desc: Build everything and run the server
+    cmds:
+      - task: backend:run
+
   # ── Project-wide ────────────────────────────────────────────────────
   build:local:
     desc: Build all packages
     deps:
       - backend:build
-      - frontend:build
+      - frontend:bundle
 
   test:unit:
     desc: Run all tests
