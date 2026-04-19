@@ -54,6 +54,7 @@ fn test_config() -> agent.AgentConfig {
       model: "test-model",
     ),
     system_prompt: "You are a test assistant.",
+    extra_widgets: [],
   )
 }
 

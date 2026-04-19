@@ -18,6 +18,9 @@ import eddie/agent.{
   type AgentConfig, type AgentConfigOverride, type AgentMessage, AgentConfig,
 }
 import eddie/http as eddie_http
+import eddie/mailbox_broker.{type MailboxBrokerMessage}
+import eddie/widgets/mailbox as eddie_mailbox
+import eddie/widgets/subagent_manager as eddie_subagent_manager
 
 import eddie_shared/agent_info.{
   type AgentInfo, type AgentStatus, type AgentTreeNode, AgentInfo, AgentTreeNode,
@@ -74,6 +77,8 @@ pub opaque type AgentTreeMessage {
   UpdateStatus(agent_id: String, status: AgentStatus)
   SubscribeTree(subscriber: Subject(String))
   UnsubscribeTree(subscriber: Subject(String))
+  SetSelf(subject: Subject(AgentTreeMessage))
+  SetBroker(broker: Subject(MailboxBrokerMessage))
 }
 
 /// Internal actor state.
@@ -84,6 +89,8 @@ type TreeState {
     send_fn: fn(Request(String)) ->
       Result(Response(String), eddie_http.HttpError),
     subscribers: List(Subject(String)),
+    self: Option(Subject(AgentTreeMessage)),
+    broker: Option(Subject(MailboxBrokerMessage)),
   )
 }
 
@@ -106,13 +113,18 @@ pub fn start_with_send_fn(
       base_config: config,
       send_fn: send_fn,
       subscribers: [],
+      self: None,
+      broker: None,
     )
   let result =
     actor.new(initial_state)
     |> actor.on_message(handle_message)
     |> actor.start
   case result {
-    Ok(started) -> Ok(started.data)
+    Ok(started) -> {
+      process.send(started.data, SetSelf(subject: started.data))
+      Ok(started.data)
+    }
     Error(err) -> Error(err)
   }
 }
@@ -122,6 +134,12 @@ fn handle_message(
   msg: AgentTreeMessage,
 ) -> actor.Next(TreeState, AgentTreeMessage) {
   case msg {
+    SetSelf(subject) ->
+      actor.continue(TreeState(..state, self: Some(subject)))
+
+    SetBroker(broker) ->
+      actor.continue(TreeState(..state, broker: Some(broker)))
+
     GetAgent(id, reply_to) -> {
       let result = case dict.get(state.agents, id) {
         Ok(entry) -> Ok(entry.subject)
@@ -173,11 +191,18 @@ fn handle_message(
           actor.continue(state)
         }
         False -> {
+          let extra = build_extra_widgets(
+            agent_id: id,
+            parent_id: None,
+            tree_self: state.self,
+            broker: state.broker,
+          )
           let config =
             AgentConfig(
               ..state.base_config,
               agent_id: id,
               system_prompt: system_prompt,
+              extra_widgets: extra,
             )
           case agent.start_with_send_fn(config: config, send_fn: state.send_fn) {
             Error(err) -> {
@@ -217,11 +242,20 @@ fn handle_message(
               actor.continue(state)
             }
             Ok(parent_entry) -> {
+              let extra = build_extra_widgets(
+                agent_id: id,
+                parent_id: Some(parent_id),
+                tree_self: state.self,
+                broker: state.broker,
+              )
               let child_config =
-                agent.merge_config(
-                  parent: state.base_config,
-                  child_id: id,
-                  override: override,
+                AgentConfig(
+                  ..agent.merge_config(
+                    parent: state.base_config,
+                    child_id: id,
+                    override: override,
+                  ),
+                  extra_widgets: extra,
                 )
               case
                 agent.start_with_send_fn(
@@ -293,6 +327,73 @@ fn handle_message(
       )
     }
   }
+}
+
+// ============================================================================
+// Extra widget construction
+// ============================================================================
+
+import eddie/widget.{type WidgetHandle}
+
+/// Build extra widgets for an agent based on its position in the tree.
+fn build_extra_widgets(
+  agent_id agent_id: String,
+  parent_id parent_id: Option(String),
+  tree_self tree_self: Option(Subject(AgentTreeMessage)),
+  broker broker: Option(Subject(MailboxBrokerMessage)),
+) -> List(WidgetHandle) {
+  let subagent_widgets = case tree_self {
+    Some(tree) -> {
+      let aid = agent_id
+      let spawn_fn = fn(child_id, label, goal, initial_message, system_prompt) {
+        let override =
+          agent.AgentConfigOverride(
+            model: None,
+            api_base: None,
+            system_prompt: Some(system_prompt),
+          )
+        case
+          spawn_child(
+            tree: tree,
+            id: child_id,
+            label: label,
+            parent_id: aid,
+            goal: goal,
+            initial_message: initial_message,
+            override: override,
+          )
+        {
+          Ok(_) -> Ok(Nil)
+          Error(AgentAlreadyExists(id)) ->
+            Error("Agent '" <> id <> "' already exists")
+          Error(ParentNotFound(id)) ->
+            Error("Parent '" <> id <> "' not found")
+          Error(AgentStartFailed(_)) -> Error("Failed to start agent")
+        }
+      }
+      let list_fn = fn() { get_children(tree: tree, parent_id: aid) }
+      [
+        eddie_subagent_manager.create(
+          agent_id: agent_id,
+          spawn_fn: spawn_fn,
+          list_children_fn: list_fn,
+        ),
+      ]
+    }
+    None -> []
+  }
+  let mailbox_widgets = case broker {
+    Some(b) -> [
+      eddie_mailbox.create(
+        agent_id: agent_id,
+        parent_id: parent_id,
+        child_ids: [],
+        broker: b,
+      ),
+    ]
+    None -> []
+  }
+  list.append(subagent_widgets, mailbox_widgets)
 }
 
 // ============================================================================
@@ -438,4 +539,12 @@ pub fn unsubscribe_tree(
   subscriber subscriber: Subject(String),
 ) -> Nil {
   process.send(tree, UnsubscribeTree(subscriber:))
+}
+
+/// Set the mailbox broker on the tree (called once at startup).
+pub fn set_broker(
+  tree tree: Subject(AgentTreeMessage),
+  broker broker: Subject(MailboxBrokerMessage),
+) -> Nil {
+  process.send(tree, SetBroker(broker:))
 }

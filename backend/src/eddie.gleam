@@ -5,6 +5,7 @@ import gleam/result
 import eddie/agent
 import eddie/agent_tree
 import eddie/llm
+import eddie/mailbox_broker
 import eddie/server
 
 pub fn main() -> Nil {
@@ -35,9 +36,12 @@ pub fn main() -> Nil {
         model: model,
       ),
       system_prompt: default_system_prompt(),
+      extra_widgets: [],
     )
 
   let assert Ok(tree) = agent_tree.start(config: base_config)
+  let assert Ok(broker) = mailbox_broker.start()
+  agent_tree.set_broker(tree: tree, broker: broker)
 
   let server_config = server.ServerConfig(port: port)
   let assert Ok(_) = server.start(config: server_config, tree: tree)

@@ -23,7 +23,7 @@ import eddie/coerce
 import eddie/context.{type Context}
 import eddie/http as eddie_http
 import eddie/llm.{type LlmConfig}
-import eddie/widget
+import eddie/widget.{type WidgetHandle}
 import eddie/widgets/conversation_log as eddie_conversation_log
 import eddie/widgets/file_explorer as eddie_file_explorer
 import eddie/widgets/goal as eddie_goal
@@ -35,7 +35,14 @@ import eddie_shared/turn_result as shared_turn_result
 
 /// Configuration for creating an agent.
 pub type AgentConfig {
-  AgentConfig(agent_id: String, llm_config: LlmConfig, system_prompt: String)
+  AgentConfig(
+    agent_id: String,
+    llm_config: LlmConfig,
+    system_prompt: String,
+    /// Extra widget handles injected by the caller (e.g. mailbox, subagent_manager).
+    /// This avoids import cycles — agent.gleam doesn't need to know about specific widgets.
+    extra_widgets: List(WidgetHandle),
+  )
 }
 
 /// Partial overrides for child agent configuration.
@@ -63,6 +70,7 @@ pub fn merge_config(
       model: option.unwrap(override.model, parent.llm_config.model),
     ),
     system_prompt: option.unwrap(override.system_prompt, parent.system_prompt),
+    extra_widgets: [],
   )
 }
 
@@ -137,7 +145,7 @@ pub fn start_with_send_fn(
   send_fn send_fn: fn(Request(String)) ->
     Result(Response(String), eddie_http.HttpError),
 ) -> Result(Subject(AgentMessage), actor.StartError) {
-  let ctx = build_context(system_prompt: config.system_prompt)
+  let ctx = build_context(config: config)
   let initial_state =
     AgentState(
       context: ctx,
@@ -765,15 +773,16 @@ fn notify_tool_result(
 // Context construction
 // ============================================================================
 
-/// Build a fresh context with default widgets.
-fn build_context(system_prompt system_prompt: String) -> Context {
-  let sp = eddie_system_prompt.create(text: system_prompt)
+/// Build a fresh context with default widgets plus any extras from config.
+fn build_context(config config: AgentConfig) -> Context {
+  let sp = eddie_system_prompt.create(text: config.system_prompt)
   let log = eddie_conversation_log.init()
-  let children = [
+  let base_children = [
     eddie_goal.create_default(),
     eddie_file_explorer.create(),
     eddie_token_usage.create(),
   ]
+  let children = list.append(base_children, config.extra_widgets)
   context.new(system_prompt: sp, children: children, conversation_log: log)
 }
 
