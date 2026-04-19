@@ -8,3 +8,6 @@
 6. [Synchronous turn loop inside the agent actor](./tradeoffs/06-synchronous-turn-in-actor.md) — LLM turn loop blocks the actor mailbox for simplicity over responsiveness
 7. [Dual-strategy structured output](./tradeoffs/07-dual-strategy-structured-output.md) — tool-call and native strategies exposed as caller's choice rather than auto-detected or hardcoded
 8. [Dynamic-to-JSON re-encoding via Erlang FFI](./tradeoffs/08-dynamic-to-json-ffi-roundtrip.md) — string round-trip to transform opaque json.Json values
+9. [Agent tree without OTP supervision](./tradeoffs/09-agent-tree-without-supervision.md) — standalone child actors without supervisor restart or health monitoring
+10. [Token usage recording via Context reconstruction](./tradeoffs/10-token-usage-via-context-rebuild.md) — string ID lookup and Context rebuild to deliver usage data to the token_usage widget
+11. [Synchronous simplifile IO inside CmdEffect](./tradeoffs/11-simplifile-sync-io-in-cmdeffect.md) — file explorer blocks the agent actor during filesystem operations

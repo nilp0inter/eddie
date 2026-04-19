@@ -46,3 +46,4 @@ glopenai = { version = ">= 1.0.0 and < 2.0.0" }
 lustre = { version = ">= 5.6.0 and < 6.0.0" }
 mist = { version = ">= 6.0.3 and < 7.0.0" }
 sextant = { version = ">= 1.0.0 and < 2.0.0" }
+simplifile = { version = ">= 2.4.0 and < 3.0.0" }

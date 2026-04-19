@@ -47,15 +47,20 @@ The **agent loop** is the core cycle:
 The agent's context is composed from a tree of widgets, orchestrated by the **Context compositor**:
 
 - **SystemPrompt** — provides the agent's identity and framing text as a system message
+- **Goal** — tracks the conversation objective (protocol-free, callable without active task)
+- **FileExplorer** — filesystem navigation using `CmdEffect` for IO operations
+- **TokenUsage** — display-only widget tracking input/output tokens per LLM request
 - **ConversationLog** — manages task-partitioned conversation history, memory management, and the task protocol that governs when non-task tools can be called
 
-Additional widgets (goal, token usage, file explorer) are planned for Phase 6.
+## Hierarchical agents
+
+Eddie supports multi-agent hierarchies through `AgentTree`. A tree starts with a root agent and can spawn child agents with config overrides (model, API base, system prompt). Each child is an independent OTP actor with its own context and turn loop. API keys are always inherited from the parent.
 
 ## Context compositor and LLM bridge
 
 The **Context** (`eddie/context`) is the root compositor that holds the widget tree, routes tool calls to their owning widgets, and enforces the task protocol before dispatch. It composes messages and tools from all widgets in a fixed order (system prompt → children → conversation log).
 
-The **LLM bridge** (`eddie/llm`) converts between Eddie types and glopenai types in a sans-IO style — it builds HTTP requests and parses responses without performing network IO. The **HTTP layer** (`eddie/http`) is the only module that touches the network.
+The **LLM bridge** (`eddie/llm`) converts between Eddie types and glopenai types in a sans-IO style — it builds HTTP requests and parses responses (including token usage data) without performing network IO. The **HTTP layer** (`eddie/http`) is the only module that touches the network.
 
 ## Structured output
 

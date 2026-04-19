@@ -7,6 +7,8 @@
 OTP actor that owns the agent state and runs the LLM turn loop. The actor processes one message at a time — the turn loop runs synchronously within the actor process, which is idiomatic for the BEAM (lightweight processes, no thread contention).
 
 - **`AgentConfig(llm_config, system_prompt)`** — configuration passed at start
+- **`AgentConfigOverride(model, api_base, system_prompt)`** — partial overrides for child agents (all fields `Option`). API key is always inherited
+- **`merge_config(parent, override)`** — produces a child `AgentConfig` from a parent config and an override (None fields inherit from parent)
 - **`AgentMessage`** — opaque message type with five variants:
   - `RunTurn(text, reply_to)` — user message triggers a full turn loop
   - `GetState(reply_to)` — return current Context for inspection
@@ -23,9 +25,12 @@ The recursive turn loop (`turn_loop → do_turn_step → handle_llm_response →
 
 1. Compose messages and tools from the Context
 2. Build an HTTP request via `llm.build_request` and send via the injectable `send_fn`
-3. Parse the response; consume picks; record the response in the conversation log
-4. If tool calls: dispatch each through `context.handle_tool_call`, collect `ToolReturnPart`s, record tool results, continue loop
-5. If text only: extract text and return `TurnSuccess`
+3. Parse the response (extracting both the message and token usage data); send usage to the token_usage widget
+4. Consume picks; record the response in the conversation log
+5. If tool calls: dispatch each through `context.handle_tool_call`, collect `ToolReturnPart`s, record tool results, continue loop
+6. If text only: extract text and return `TurnSuccess`
+
+**Default widget tree:** `build_context` creates a Context with the system prompt, goal, file explorer, and token usage widgets as children, plus the conversation log.
 
 **Subscriber notification:**
 
@@ -80,7 +85,20 @@ Application entry point. Reads configuration from environment variables, creates
 | `EDDIE_MODEL` | No | `anthropic/claude-sonnet-4` | Model identifier |
 | `EDDIE_PORT` | No | `8080` | HTTP listening port |
 
-## Widgets (Phase 2)
+### `eddie/agent_tree` (Phase 6)
+
+Manages hierarchical parent-child agent relationships. Each agent in the tree is an independent OTP actor with its own context and turn loop.
+
+- **`AgentTree`** — opaque type holding the root agent, root config, children dict, and send_fn
+- **`start(config)` / `start_with_send_fn(config, send_fn)`** — creates a tree with a root agent
+- **`spawn_child(tree, id, override)`** — starts a child agent with `merge_config(root_config, override)`, returns `Result(AgentTree, SpawnError)`
+- **`SpawnError`** — `ChildAlreadyExists(id)` | `ChildStartFailed(StartError)`
+- **`get_child(tree, id)`** — looks up a child by ID
+- **`root(tree)` / `children(tree)`** — accessors
+
+Children share the parent's `send_fn` (HTTP sender) and API key. The tree does not use OTP supervision — each child is a standalone actor started with `agent.start_with_send_fn`. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
+
+## Widgets (Phase 2 + Phase 6)
 
 ### `eddie/widgets/system_prompt`
 
@@ -155,6 +173,42 @@ An "Open tasks" block listing pending and in-progress tasks is appended at the e
 
 **Factory:** `create()` — returns a `WidgetHandle` with an empty model. For Context's use, `init()` returns a typed `ConversationLog` opaque type with direct dispatch, protocol checking, and owning task ID access (see [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md)).
 
+### `eddie/widgets/goal` (Phase 6)
+
+Protocol-free goal tracking. Both the LLM and the browser can set or clear the goal at any time, without needing an active task.
+
+- **Model:** `GoalModel(text: Option(String))`
+- **Messages:** `SetGoal(goal, initiator)` | `ClearGoal(initiator)` — both carry `Initiator` to determine whether to return a tool result
+- **LLM tools:** `set_goal` (string `goal` parameter) and `clear_goal` (no parameters) — both protocol-free
+- **Frontend events:** `set_goal` and `clear_goal`
+- **Views:** `view_messages` yields a `UserPart` with `## Goal\n{text}` or `## Goal\nNo goal set`; `view_html` renders a heading, content, input field, and buttons
+- **Factory:** `create(text:)` with `Option(String)`, or `create_default()` for no initial goal
+
+### `eddie/widgets/file_explorer` (Phase 6)
+
+Filesystem navigation using `CmdEffect` for IO operations. All tools are protocol-free. Uses `simplifile` for directory listing and file reading.
+
+- **Model:** `FileExplorerModel(open_directories, open_files)` — `OpenDirectory(path, entries, listing_text)`, files as `List(#(String, String))`
+- **Messages:**
+  - IO triggers: `OpenDirectoryRequested(path)`, `ReadFileRequested(path)` — produce `CmdEffect` that runs the IO and feeds a result message back into update
+  - IO results: `DirectoryOpened(path, entries, listing_text)`, `DirectoryOpenError(error)`, `FileRead(path, content)`, `FileReadError(error)`
+  - Close: `CloseDirectory(path, initiator)`, `CloseReadFile(path, initiator)`
+- **LLM tools:** `open_directory` (path defaults to `"."`), `close_directory`, `read_file`, `close_read_file` — all protocol-free
+- **Frontend events:** same four tool names
+- **Views:** `view_messages` yields a markdown listing of open directories and file contents; `view_html` renders directory trees and file previews
+- **IO pattern:** `CmdEffect(perform: fn() { coerce.unsafe_coerce(do_open_directory(path)) }, to_msg: coerce.unsafe_coerce)` — the perform closure runs the real IO, returns a `FileExplorerMsg` coerced to `Dynamic`, and `to_msg` coerces it back. Re-opening the same path refreshes the listing
+- **Factory:** `create()`
+
+### `eddie/widgets/token_usage` (Phase 6)
+
+Display-only token tracking. No LLM tools or messages — receives data via `widget.send()` from the agent turn loop after each LLM response.
+
+- **Model:** `TokenUsageModel(records: List(TokenRecord))` — records stored reversed (prepend), reversed for display. `TokenRecord(request_number, input_tokens, output_tokens)`
+- **Messages:** `UsageRecorded(input_tokens, output_tokens)` — a single message variant
+- **Views:** `view_messages` returns `[]`, `view_tools` returns `[]`; `view_html` shows request count, total input/output tokens (with K/M suffix formatting), and the last 10 records
+- **Integration:** the agent's `record_token_usage` function finds the token_usage widget by ID in the children list and sends a `UsageRecorded` message via `widget.send` after each parsed LLM response
+- **Factory:** `create()`
+
 ## Structured Output (Phase 5)
 
 ### `eddie/structured_output`
@@ -206,8 +260,9 @@ The conversation log is stored as a typed `ConversationLog` (not a `WidgetHandle
 Sans-IO LLM client bridge. Converts between Eddie types and glopenai types without performing any network IO.
 
 - **`LlmConfig(api_base, api_key, model)`** — configuration for the LLM endpoint
+- **`TokenUsage(input_tokens, output_tokens)`** — token counts extracted from the LLM response
 - **`build_request(config, messages, tools)`** — converts Eddie `Message` and `ToolDefinition` lists into a glopenai `CreateChatCompletionRequest`, returns a ready-to-send `Request(String)`
-- **`parse_response(response)`** — parses a glopenai API response into an Eddie `Message`, returns `Result(Message, LlmError)`
+- **`parse_response(response)`** — parses a glopenai API response into an Eddie `Message` and optional token usage, returns `Result(#(Message, Option(TokenUsage)), LlmError)`. The usage is extracted from glopenai's `CompletionUsage` (prompt_tokens → input_tokens, completion_tokens → output_tokens)
 - **`LlmError`** — `ApiError(GlopenaiError)` | `EmptyResponse`
 
 ### `eddie/http`

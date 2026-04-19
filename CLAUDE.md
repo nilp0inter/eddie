@@ -31,6 +31,7 @@ src/
   eddie.gleam          Entry point (env config, start agent + server)
   eddie/
     agent.gleam        OTP actor: turn loop, subscriber notifications
+    agent_tree.gleam   Hierarchical agent management (parent-child)
     server.gleam       mist HTTP + WebSocket server, inline HTML frontend
     cmd.gleam          Cmd(msg) side-effect descriptors, Initiator type
     message.gleam      MessagePart, Message types, glopenai conversion
@@ -40,6 +41,12 @@ src/
     llm.gleam          Sans-IO LLM client bridge (glopenai)
     http.gleam         HTTP execution layer (gleam_httpc)
     coerce.gleam       Unsafe type coercion for type erasure boundary
+    widgets/
+      system_prompt.gleam    System prompt identity text
+      conversation_log.gleam Task-partitioned conversation history
+      goal.gleam             Protocol-free goal tracking
+      file_explorer.gleam    Filesystem navigation (CmdEffect IO)
+      token_usage.gleam      Display-only token tracking
   eddie_ffi.erl        Erlang FFI (identity, get_env)
 test/
   eddie/
@@ -50,6 +57,10 @@ test/
     context_test.gleam
     llm_test.gleam
     agent_test.gleam
+    agent_tree_test.gleam
+    goal_test.gleam
+    file_explorer_test.gleam
+    token_usage_test.gleam
 reference/             Read-only reference implementations
   calipso/             Python reference (Elm-architecture widgets)
   glopenai/            Gleam OpenAI client (published on hex.pm)

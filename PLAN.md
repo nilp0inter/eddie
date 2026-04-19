@@ -166,36 +166,37 @@ Reference files:
 
 ---
 
-## Phase 6: Hierarchical Agents and Additional Widgets
+## Phase 6: Hierarchical Agents and Additional Widgets ✅
+
+**Status:** Complete — 164 tests passing (155 Phase 1-5 + 9 Phase 6), glinter clean (expected warnings only).
 
 **Goal:** Multi-agent spawning and remaining Calipso widgets.
 
-### Files to create
+**Implemented:**
+- `src/eddie/widgets/goal.gleam` — Protocol-free goal widget with `SetGoal`/`ClearGoal` messages, `set_goal`/`clear_goal` tools (both LLM + UI), `GoalModel(text: Option(String))`, `create(text:)`/`create_default()` factories
+- `src/eddie/widgets/file_explorer.gleam` — Filesystem navigation with `CmdEffect` for IO, `open_directory`/`close_directory`/`read_file`/`close_read_file` tools, directory listing with entry classification, all protocol-free
+- `src/eddie/widgets/token_usage.gleam` — Display-only token tracking, `UsageRecorded` via `widget.send()`, `format_tokens` with K/M suffix formatting, no LLM tools/messages
+- `src/eddie/agent_tree.gleam` — Hierarchical agent management with opaque `AgentTree(root, children)`, `spawn_child`/`get_child`/`children`, `SpawnError` (ChildAlreadyExists/ChildStartFailed)
+- `src/eddie/agent.gleam` — Added `AgentConfigOverride`/`merge_config`, integrated goal/file_explorer/token_usage as child widgets in `build_context`, `record_token_usage` sends usage data after each LLM response
+- `src/eddie/llm.gleam` — Added `TokenUsage` type, `parse_response` now returns `#(Message, Option(TokenUsage))`
 
-**`src/eddie/agent_tree.gleam`** — Hierarchical agent management
-- `AgentTree(root, children)` with OTP supervisor
-- `spawn_child(parent, id, config_override) -> Result(AgentTree, StartError)`
-- Config inheritance: child defaults to parent's LlmConfig, overrides specific fields
+**Key design decisions made during implementation:**
+- Config merge lives in `agent.gleam` (not a separate `config.gleam`) to avoid module fragmentation
+- `AgentTree` uses direct actor spawning (no OTP supervisor) — sufficient for current needs
+- API key always inherited from parent (never overridden) for security
+- Token usage widget receives data via `widget.send` from the agent turn loop after each LLM response
+- File explorer uses `simplifile` for filesystem operations, executed synchronously in `CmdEffect`
+- All three new widgets are protocol-free (callable without active task)
 
-**`src/eddie/config.gleam`** — Config merge
-- `AgentConfigOverride(model?, api_base?, system_prompt?)`
-- `merge_config(parent, override) -> AgentConfig`
+**Dependencies added:** `simplifile`
 
-**`src/eddie/widgets/goal.gleam`** — Protocol-free goal widget
-- Model: `GoalModel(text: Option(String))`
-- Tools: `set_goal`, `clear_goal` (both LLM + UI, protocol-free)
-
-**`src/eddie/widgets/token_usage.gleam`** — Display-only tracking
-- Receives `UsageRecorded` via `send()` after each response
-
-**`src/eddie/widgets/file_explorer.gleam`** — File system browsing
-- Uses `CmdEffect` for directory listing / file reading IO
-
-### Tests
-- Parent spawns child, child inherits config
-- Child config overrides work
-- Goal set/clear, verify protocol-free (works without active task)
-- File explorer: open/close directory, read file (with mocked effects)
+**Tests cover:**
+- Goal: create with/without text, set/clear via LLM/UI, unknown tool, missing field, protocol-free tools, frontend tools, view_tools/view_messages
+- File Explorer: open directory (real IO), default path, nonexistent directory, read file, nonexistent file, missing path, close directory/file, close nonexistent, reopen refreshes, UI dispatch, unknown tool, protocol-free tools, view_tools
+- Token Usage: empty state (messages/tools/html), single/multiple usage records, large token formatting (K/M), from_llm always errors, from_ui always None, sequential request numbering
+- Agent Tree: start tree, root usable, spawn child, child usable, duplicate child fails, nonexistent child fails, children dict
+- Config Merge: full override, partial override, no override (inherits parent)
+- LLM: parse_response returns usage, parse_response handles missing usage
 
 ---
 
@@ -208,7 +209,7 @@ Reference files:
 | 3 | gleam_httpc, gleam_http |
 | 4 | gleam_otp, gleam_erlang, mist |
 | 5 | sextant |
-| 6 | — |
+| 6 | simplifile |
 
 ## Verification
 

@@ -2,6 +2,7 @@ import gleam/http
 import gleam/http/response
 import gleam/json
 import gleam/list
+import gleam/option.{None, Some}
 import gleam/string
 import gleeunit/should
 
@@ -128,7 +129,7 @@ pub fn parse_response_text_only_test() {
   let result = llm.parse_response(response: resp)
 
   case result {
-    Ok(message.Response(parts: [message.TextPart(text)])) ->
+    Ok(#(message.Response(parts: [message.TextPart(text)]), _usage)) ->
       text == "Hello! How can I help?"
     _ -> False
   }
@@ -143,7 +144,10 @@ pub fn parse_response_with_tool_call_test() {
   let result = llm.parse_response(response: resp)
 
   case result {
-    Ok(message.Response(parts: [message.ToolCallPart(name, args_json, id)])) ->
+    Ok(#(
+      message.Response(parts: [message.ToolCallPart(name, args_json, id)]),
+      _usage,
+    )) ->
       name == "create_task"
       && string.contains(args_json, "Fix bug")
       && id == "call_abc"
@@ -168,6 +172,27 @@ pub fn parse_response_api_error_test() {
 
   let result = llm.parse_response(response: resp)
   result |> should.be_error
+}
+
+pub fn parse_response_returns_usage_test() {
+  let json_body =
+    "{\"id\":\"chatcmpl-123\",\"object\":\"chat.completion\",\"created\":1234567890,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"total_tokens\":150}}"
+  let resp = response.new(200) |> response.set_body(json_body)
+  let result = llm.parse_response(response: resp)
+  let assert Ok(#(_, Some(usage))) = result
+  usage.input_tokens
+  |> should.equal(100)
+  usage.output_tokens
+  |> should.equal(50)
+}
+
+pub fn parse_response_no_usage_test() {
+  let json_body =
+    "{\"id\":\"chatcmpl-123\",\"object\":\"chat.completion\",\"created\":1234567890,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":\"stop\"}]}"
+  let resp = response.new(200) |> response.set_body(json_body)
+  let result = llm.parse_response(response: resp)
+  let assert Ok(#(_, None)) = result
+  should.be_true(True)
 }
 
 // ============================================================================

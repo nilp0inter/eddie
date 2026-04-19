@@ -19,7 +19,7 @@ The synchronous approach was chosen because:
 
 - **All other agent messages are queued during a turn.** A `GetState` call blocks until the turn finishes. A `Subscribe` sent mid-turn means the new subscriber misses updates from that turn. A `DispatchEvent` (browser widget interaction) is delayed.
 - **No mid-turn cancellation.** The only way to stop a turn is the 25-iteration cap or HTTP timeouts. There is no mechanism for the server to tell the agent "stop this turn."
-- **Multi-agent contention.** If Phase 6 hierarchical agents share an actor (or if the server sends multiple turns concurrently), they would queue behind each other. Each agent should be its own actor, but even within a single agent, rapid user messages would serialize.
+- **Multi-agent contention.** With Phase 6's `AgentTree`, each child agent is its own actor (not sharing a process), so inter-agent contention is avoided. However, within a single agent, rapid user messages still serialize, and any cross-agent communication (parent querying child state during a turn) would block.
 
 ## What would make us reconsider
 

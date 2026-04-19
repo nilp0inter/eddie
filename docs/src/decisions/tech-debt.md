@@ -22,7 +22,7 @@ Both `system_prompt.gleam` and `conversation_log.gleam` have stub `view_html` im
 
 ## Agent turn loop blocks the actor mailbox
 
-The agent actor processes `RunTurn` synchronously — while a turn is in progress (which involves multiple HTTP round-trips to the LLM), all other messages (`GetState`, `Subscribe`, `Unsubscribe`, `DispatchEvent`) are queued. This means a subscriber registering during a turn won't receive updates until the turn completes, and `GetState` calls will block until the turn finishes. For single-user Milestone 1 this is acceptable because `Subscribe` is called at WebSocket init (before any turn), and `GetState` is not used in the hot path. For multi-agent Phase 6, the turn could be offloaded to a spawned child process that sends state diffs back to the actor, keeping the mailbox responsive.
+The agent actor processes `RunTurn` synchronously — while a turn is in progress (which involves multiple HTTP round-trips to the LLM), all other messages (`GetState`, `Subscribe`, `Unsubscribe`, `DispatchEvent`) are queued. This means a subscriber registering during a turn won't receive updates until the turn completes, and `GetState` calls will block until the turn finishes. For single-user Milestone 1 this is acceptable because `Subscribe` is called at WebSocket init (before any turn), and `GetState` is not used in the hot path. With multi-agent support now in place (Phase 6), this becomes more pressing — child agents querying the parent or vice versa will block on a running turn. The turn could be offloaded to a spawned child process that sends state diffs back to the actor, keeping the mailbox responsive.
 
 ## No turn cancellation or timeout recovery
 
@@ -47,3 +47,27 @@ Once a turn starts, there is no way to cancel it from the browser or from the se
 ## Spawned helper process for turn execution
 
 The server spawns a `process.spawn` helper to call `agent.run_turn` because `AgentMessage` is opaque — the server cannot construct a `RunTurn` message directly and must go through the blocking public API. This means each user turn creates an extra BEAM process that exists only to bridge the call. The helper process is very lightweight (a single function call) but it introduces an indirection: the WebSocket handler sends no message to the agent directly for turns; instead, the spawned process calls `agent.run_turn`, and HTML updates flow back separately through the subscriber mechanism. An alternative would be to expose a public message constructor on the agent, but that would leak the internal protocol.
+
+## Token usage widget found by string ID
+
+`record_token_usage` in `agent.gleam` scans the children list with `list.map` looking for `widget.id(child) == "token_usage"`. If the widget's ID changes or is removed from the default widget tree, usage recording silently stops. A typed reference (similar to how ConversationLog is held typed in Context) would be safer but would further complicate Context's asymmetric widget treatment. See [trade-off card](./tradeoffs/10-token-usage-via-context-rebuild.md).
+
+## Context reconstruction in record_token_usage
+
+After sending usage data to the token_usage widget, `record_token_usage` creates an entirely new `Context` via `context.new(system_prompt, new_children, log)`, which triggers a full `rebuild_tool_owners` scan. This is an extra O(widgets × tools) rebuild per LLM response beyond the rebuilds already triggered by `add_response`. For the current widget count (5 widgets, ~12 tools) this is negligible, but it's architecturally wasteful. A `Context.update_child` or `Context.send_to_child` function would eliminate the reconstruction, but it would add mutation surface to an interface that is currently compose-and-dispatch only.
+
+## AgentTree holds dead Subjects after child crashes
+
+`AgentTree` stores child agent Subjects in a `Dict` but has no process monitoring. If a child actor crashes, its Subject remains in the dict. Any attempt to communicate with the dead child (via `agent.run_turn`, `agent.get_child`) will hang until the call timeout. There is no API to remove a child or detect a crashed one. Adding `process.monitor` for each child and handling `ProcessDown` messages would fix this, but requires `AgentTree` to become an actor itself (currently it's a pure data structure).
+
+## File explorer reads entire files into memory
+
+`do_read_file` in `file_explorer.gleam` calls `simplifile.read(path)` which loads the entire file as a single `String`. There is no size limit or streaming. Reading a large binary file or a multi-megabyte log will consume proportional memory in the agent process. A size check before reading, or a truncation strategy (read first N bytes), would be a minimal safety net.
+
+## No file size or path traversal validation in file explorer
+
+The file explorer's `open_directory` and `read_file` tools accept arbitrary paths from the LLM with no sandboxing or path traversal protection. The LLM can read any file the BEAM process has access to, including `..` paths, symlink targets, and sensitive configuration. For a single-user local agent this matches the trust model (the LLM acts on behalf of the user), but for any multi-user or exposed deployment, a path allowlist or chroot-like restriction would be essential.
+
+## Placeholder view_html in Phase 6 widgets
+
+Goal, file explorer, and token usage widgets have minimal `view_html` implementations — basic Lustre elements without styling, interactivity, or the rich HTML that the Calipso Python reference provides. The inline JS in `server.gleam` handles OOB swaps by element ID, so the widgets are visible in the browser sidebar, but the UX is placeholder quality. This matches the existing debt for Phase 2 widgets (SystemPrompt and ConversationLog stubs).

@@ -14,22 +14,54 @@ import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/json
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import gleam/string
 
+import eddie/coerce
 import eddie/context.{type Context}
 import eddie/http as eddie_http
 import eddie/llm.{type LlmConfig}
 import eddie/message.{type Message}
+import eddie/widget
 import eddie/widgets/conversation_log as eddie_conversation_log
+import eddie/widgets/file_explorer as eddie_file_explorer
+import eddie/widgets/goal as eddie_goal
 import eddie/widgets/system_prompt as eddie_system_prompt
+import eddie/widgets/token_usage as eddie_token_usage
 
 import lustre/element
 
 /// Configuration for creating an agent.
 pub type AgentConfig {
   AgentConfig(llm_config: LlmConfig, system_prompt: String)
+}
+
+/// Partial overrides for child agent configuration.
+/// None fields inherit from the parent.
+pub type AgentConfigOverride {
+  AgentConfigOverride(
+    model: Option(String),
+    api_base: Option(String),
+    system_prompt: Option(String),
+  )
+}
+
+/// Merge a parent config with an override to produce a child config.
+/// None fields in the override inherit from the parent.
+pub fn merge_config(
+  parent parent: AgentConfig,
+  override override: AgentConfigOverride,
+) -> AgentConfig {
+  AgentConfig(
+    llm_config: llm.LlmConfig(
+      api_base: option.unwrap(override.api_base, parent.llm_config.api_base),
+      api_key: parent.llm_config.api_key,
+      model: option.unwrap(override.model, parent.llm_config.model),
+    ),
+    system_prompt: option.unwrap(override.system_prompt, parent.system_prompt),
+  )
 }
 
 /// Result of a turn.
@@ -235,7 +267,10 @@ fn handle_llm_response(
 ) -> #(AgentState, TurnResult) {
   case llm.parse_response(response: response) {
     Error(err) -> #(state, TurnError(reason: llm_error_to_string(err)))
-    Ok(eddie_response) -> {
+    Ok(#(eddie_response, usage)) -> {
+      // Send token usage to the token_usage widget if available
+      let state = record_token_usage(state: state, usage: usage)
+
       // Consume picks before adding response
       let old_ctx = state.context
       let ctx = context.consume_picks(context: state.context)
@@ -350,7 +385,12 @@ fn notify_subscribers(
 fn build_context(system_prompt system_prompt: String) -> Context {
   let sp = eddie_system_prompt.create(text: system_prompt)
   let log = eddie_conversation_log.init()
-  context.new(system_prompt: sp, children: [], conversation_log: log)
+  let children = [
+    eddie_goal.create_default(),
+    eddie_file_explorer.create(),
+    eddie_token_usage.create(),
+  ]
+  context.new(system_prompt: sp, children: children, conversation_log: log)
 }
 
 // ============================================================================
@@ -409,6 +449,40 @@ fn json_to_dynamic(json_string: String) -> Dynamic {
     decode.new_primitive_decoder("dynamic", fn(d) { Ok(d) })
   json.parse(json_string, identity_decoder)
   |> result.unwrap(dynamic.string(json_string))
+}
+
+/// Send token usage data to the token_usage widget if available.
+/// Finds the widget by id and sends a UsageRecorded message via widget.send.
+fn record_token_usage(
+  state state: AgentState,
+  usage usage: Option(llm.TokenUsage),
+) -> AgentState {
+  case usage {
+    None -> state
+    Some(token_usage) -> {
+      let msg =
+        eddie_token_usage.UsageRecorded(
+          input_tokens: token_usage.input_tokens,
+          output_tokens: token_usage.output_tokens,
+        )
+      let coerced_msg = coerce.unsafe_coerce(msg)
+      let new_children =
+        list.map(context.children(context: state.context), fn(child) {
+          case widget.id(child) == "token_usage" {
+            True ->
+              result.unwrap(widget.send(handle: child, msg: coerced_msg), child)
+            False -> child
+          }
+        })
+      let new_ctx =
+        context.new(
+          system_prompt: context.system_prompt(context: state.context),
+          children: new_children,
+          conversation_log: context.log(context: state.context),
+        )
+      AgentState(..state, context: new_ctx)
+    }
+  }
 }
 
 fn http_error_to_string(err: eddie_http.HttpError) -> String {

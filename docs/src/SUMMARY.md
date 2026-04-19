@@ -28,4 +28,7 @@
   - [Synchronous turn in actor](./decisions/tradeoffs/06-synchronous-turn-in-actor.md)
   - [Dual-strategy structured output](./decisions/tradeoffs/07-dual-strategy-structured-output.md)
   - [Dynamic-to-JSON FFI roundtrip](./decisions/tradeoffs/08-dynamic-to-json-ffi-roundtrip.md)
+  - [Agent tree without supervision](./decisions/tradeoffs/09-agent-tree-without-supervision.md)
+  - [Token usage via Context rebuild](./decisions/tradeoffs/10-token-usage-via-context-rebuild.md)
+  - [Simplifile sync IO in CmdEffect](./decisions/tradeoffs/11-simplifile-sync-io-in-cmdeffect.md)
 - [Technical Debt](./decisions/tech-debt.md)

@@ -29,4 +29,4 @@ The inline approach was chosen because:
 
 - **Widgets need client-side state** (e.g., a code editor widget, drag-and-drop task reordering, or inline memory editing with undo). At that point, the round-trip latency for every interaction becomes unacceptable and a client-side framework is justified.
 - **The inline HTML string exceeds ~200 lines** or needs conditional rendering logic. At that point, maintaining it as a Gleam string is more painful than setting up a proper frontend build.
-- **Multi-agent Phase 6 requires complex client-side routing** (agent selection, per-agent dashboards, spawning UI). This level of UI complexity is a natural fit for a Lustre SPA.
+- **Multi-agent support requires complex client-side routing** (agent selection, per-agent dashboards, spawning UI). Phase 6 added `AgentTree` with hierarchical agents, but the frontend currently only connects to a single agent. Exposing multi-agent navigation in the UI would be a natural trigger for a Lustre SPA.

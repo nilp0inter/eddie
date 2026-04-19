@@ -5,7 +5,7 @@
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 
 import eddie/message.{type Message}
 import eddie/tool.{type ToolDefinition}
@@ -16,6 +16,11 @@ import glopenai/error
 /// Configuration for the LLM client.
 pub type LlmConfig {
   LlmConfig(api_base: String, api_key: String, model: String)
+}
+
+/// Token usage data from an LLM response.
+pub type TokenUsage {
+  TokenUsage(input_tokens: Int, output_tokens: Int)
 }
 
 /// Errors that can occur when parsing an LLM response.
@@ -51,16 +56,26 @@ pub fn build_request(
   chat.create_request(glopenai_config, params)
 }
 
-/// Parse an HTTP response into an Eddie Message.
+/// Parse an HTTP response into an Eddie Message and optional token usage.
 /// Handles the glopenai response parsing and extracts the first choice.
 pub fn parse_response(
   response response: Response(String),
-) -> Result(Message, LlmError) {
+) -> Result(#(Message, Option(TokenUsage)), LlmError) {
   case chat.create_response(response) {
     Error(err) -> Error(ApiError(err))
     Ok(completion) ->
       case completion.choices {
-        [choice, ..] -> Ok(response_message_to_eddie(choice.message))
+        [choice, ..] -> {
+          let usage = case completion.usage {
+            Some(u) ->
+              Some(TokenUsage(
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+              ))
+            None -> None
+          }
+          Ok(#(response_message_to_eddie(choice.message), usage))
+        }
         [] -> Error(EmptyResponse)
       }
   }
