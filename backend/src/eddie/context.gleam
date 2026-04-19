@@ -24,6 +24,21 @@ import eddie/widgets/conversation_log.{type ConversationLog}
 import eddie_shared/message.{type Message}
 import eddie_shared/protocol.{type ServerEvent}
 
+/// Result of dispatching a tool call through the context.
+/// ToolCompleted means the tool call finished synchronously.
+/// ToolEffectPending means an async effect needs to run before completion.
+pub type ToolDispatchResult {
+  ToolCompleted(context: Context, result: Result(String, String))
+  ToolEffectPending(
+    context: Context,
+    tool_name: String,
+    tool_call_id: String,
+    owner_id: String,
+    perform: fn() -> Dynamic,
+    resume: fn(Dynamic) -> widget.DispatchResult,
+  )
+}
+
 /// The root context compositor.
 pub opaque type Context {
   Context(
@@ -123,13 +138,13 @@ pub fn consume_picks(context context: Context) -> Context {
 /// Handle an LLM tool call. Enforces the task protocol, then dispatches
 /// to the owning widget.
 ///
-/// Returns the updated context and either Ok(tool_result) or Error(error_message).
+/// Returns a ToolDispatchResult: either ToolCompleted or ToolEffectPending.
 pub fn handle_tool_call(
   context context: Context,
   tool_name tool_name: String,
   args args: Dynamic,
   tool_call_id tool_call_id: String,
-) -> #(Context, Result(String, String)) {
+) -> ToolDispatchResult {
   // Check protocol first — conversation_log enforces task rules
   case
     conversation_log.protocol_check(
@@ -138,7 +153,7 @@ pub fn handle_tool_call(
       protocol_free_tools: context.all_protocol_free_tools,
     )
   {
-    Some(error_msg) -> #(context, Error(error_msg))
+    Some(error_msg) -> ToolCompleted(context: context, result: Error(error_msg))
     None ->
       do_handle_tool_call(
         context: context,
@@ -225,6 +240,28 @@ pub fn children(context context: Context) -> List(WidgetHandle) {
 /// Get the typed conversation log.
 pub fn log(context context: Context) -> ConversationLog {
   context.log
+}
+
+/// Replace a widget handle in the context by owner_id.
+/// Used by the agent to insert updated handles after async effects complete.
+pub fn replace_widget(
+  context context: Context,
+  owner_id owner_id: String,
+  handle handle: WidgetHandle,
+) -> Context {
+  case widget.id(context.system_prompt) == owner_id {
+    True -> rebuild_tool_owners(Context(..context, system_prompt: handle))
+    False -> {
+      let new_children =
+        list.map(context.children, fn(child) {
+          case widget.id(child) == owner_id {
+            True -> handle
+            False -> child
+          }
+        })
+      rebuild_tool_owners(Context(..context, children: new_children))
+    }
+  }
 }
 
 // ============================================================================
@@ -318,16 +355,21 @@ fn do_handle_tool_call(
   context context: Context,
   tool_name tool_name: String,
   args args: Dynamic,
-  tool_call_id _tool_call_id: String,
-) -> #(Context, Result(String, String)) {
+  tool_call_id tool_call_id: String,
+) -> ToolDispatchResult {
   case dict.get(context.tool_owners, tool_name) {
-    Error(Nil) -> #(context, Error("Unknown tool: " <> tool_name))
+    Error(Nil) ->
+      ToolCompleted(
+        context: context,
+        result: Error("Unknown tool: " <> tool_name),
+      )
     Ok(owner_id) ->
       dispatch_to_owner(
         context: context,
         owner_id: owner_id,
         tool_name: tool_name,
         args: args,
+        tool_call_id: tool_call_id,
       )
   }
 }
@@ -338,7 +380,8 @@ fn dispatch_to_owner(
   owner_id owner_id: String,
   tool_name tool_name: String,
   args args: Dynamic,
-) -> #(Context, Result(String, String)) {
+  tool_call_id tool_call_id: String,
+) -> ToolDispatchResult {
   case owner_id {
     "conversation_log" -> {
       let #(new_log, result) =
@@ -348,9 +391,16 @@ fn dispatch_to_owner(
           args: args,
         )
       let ctx = rebuild_tool_owners(Context(..context, log: new_log))
-      #(ctx, result)
+      ToolCompleted(context: ctx, result: result)
     }
-    _ -> dispatch_to_handle_widget(context:, owner_id:, tool_name:, args:)
+    _ ->
+      dispatch_to_handle_widget(
+        context:,
+        owner_id:,
+        tool_name:,
+        args:,
+        tool_call_id:,
+      )
   }
 }
 
@@ -360,18 +410,27 @@ fn dispatch_to_handle_widget(
   owner_id owner_id: String,
   tool_name tool_name: String,
   args args: Dynamic,
-) -> #(Context, Result(String, String)) {
+  tool_call_id tool_call_id: String,
+) -> ToolDispatchResult {
   // Try system_prompt
   case widget.id(context.system_prompt) == owner_id {
     True -> {
-      let #(new_sp, result) =
+      let dispatch_result =
         widget.dispatch_llm(
           handle: context.system_prompt,
           tool_name: tool_name,
           args: args,
         )
-      let ctx = rebuild_tool_owners(Context(..context, system_prompt: new_sp))
-      #(ctx, result)
+      let new_handle = widget.dispatch_result_handle(dispatch_result:)
+      let ctx =
+        rebuild_tool_owners(Context(..context, system_prompt: new_handle))
+      wrap_dispatch_result(
+        ctx,
+        dispatch_result,
+        owner_id,
+        tool_name,
+        tool_call_id,
+      )
     }
     False ->
       // Try children
@@ -384,37 +443,73 @@ fn dispatch_to_handle_widget(
           before: [],
         )
       {
-        Ok(#(new_children, result)) -> {
+        Ok(#(new_children, dispatch_result)) -> {
           let ctx =
             rebuild_tool_owners(Context(..context, children: new_children))
-          #(ctx, result)
+          wrap_dispatch_result(
+            ctx,
+            dispatch_result,
+            owner_id,
+            tool_name,
+            tool_call_id,
+          )
         }
-        Error(Nil) -> #(context, Error("Unknown tool: " <> tool_name))
+        Error(Nil) ->
+          ToolCompleted(
+            context: context,
+            result: Error("Unknown tool: " <> tool_name),
+          )
       }
   }
 }
 
+/// Convert a widget.DispatchResult into a ToolDispatchResult with context.
+fn wrap_dispatch_result(
+  ctx ctx: Context,
+  dispatch_result dispatch_result: widget.DispatchResult,
+  owner_id owner_id: String,
+  tool_name tool_name: String,
+  tool_call_id tool_call_id: String,
+) -> ToolDispatchResult {
+  case dispatch_result {
+    widget.Completed(_handle, result) ->
+      ToolCompleted(context: ctx, result: result)
+    widget.EffectPending(_handle, perform, resume) ->
+      ToolEffectPending(
+        context: ctx,
+        tool_name: tool_name,
+        tool_call_id: tool_call_id,
+        owner_id: owner_id,
+        perform: perform,
+        resume: resume,
+      )
+  }
+}
+
 /// Find the child with the given owner_id and dispatch the tool call.
-/// Returns the updated children list, or Error if the owner was not found.
+/// Returns the updated children list with the new handle, and the raw
+/// DispatchResult. Error if the owner was not found.
 fn find_and_dispatch_child(
   remaining remaining: List(WidgetHandle),
   owner_id owner_id: String,
   tool_name tool_name: String,
   args args: Dynamic,
   before before: List(WidgetHandle),
-) -> Result(#(List(WidgetHandle), Result(String, String)), Nil) {
+) -> Result(#(List(WidgetHandle), widget.DispatchResult), Nil) {
   case remaining {
     [] -> Error(Nil)
     [child, ..rest] ->
       case widget.id(child) == owner_id {
         True -> {
-          let #(new_child, result) =
+          let dispatch_result =
             widget.dispatch_llm(handle: child, tool_name: tool_name, args: args)
+          let new_handle =
+            widget.dispatch_result_handle(dispatch_result: dispatch_result)
           let new_children =
             list.reverse(before)
-            |> list.append([new_child])
+            |> list.append([new_handle])
             |> list.append(rest)
-          Ok(#(new_children, result))
+          Ok(#(new_children, dispatch_result))
         }
         False ->
           find_and_dispatch_child(

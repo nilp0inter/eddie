@@ -66,7 +66,43 @@ Widgets produce `List(ServerEvent)` instead of HTML. The agent broadcasts JSON-e
 
 ---
 
-## Phase 3: Non-blocking reactive agent
+## Phase 3: Non-blocking reactive agent ✅
+
+**Status: Complete.**
+
+The synchronous `do_run_turn` loop has been replaced with a reactive actor that never blocks. LLM calls and tool effects are spawned as async processes.
+
+### What was done
+
+**Widget infrastructure — `DispatchResult` type:**
+- `widget.gleam`: `dispatch_llm` returns `DispatchResult` (either `Completed` or `EffectPending`) instead of running effects inline
+- `execute_cmd_loop` yields `EffectPending` for `CmdEffect` instead of executing synchronously
+- Added `resolve` function to run a `DispatchResult` to completion synchronously (used by `dispatch_ui` and tests)
+- Added `dispatch_result_handle` to extract the handle from either variant
+
+**Context — `ToolDispatchResult` type:**
+- `context.gleam`: `handle_tool_call` returns `ToolDispatchResult` (either `ToolCompleted` or `ToolEffectPending`)
+- Added `replace_widget` function for the agent to insert updated handles after async effects complete
+- Added `wrap_dispatch_result` helper to convert widget-level results to context-level results
+
+**Agent — reactive actor rewrite:**
+- `agent.gleam`: Complete rewrite. New message variants: `LlmResponse`, `LlmError`, `ToolEffectResult`, `ToolEffectCrashed`, `SetSelf`
+- New state fields: `self`, `llm_in_flight`, `pending_user_messages`, `pending_effects`, `collected_tool_parts`, `current_reply_to`, `iteration`
+- LLM calls spawned via `process.spawn` — agent never blocks
+- Tool effects spawned asynchronously with resume continuations
+- User messages queued when agent is busy, drained after turn completes
+- `run_turn` preserved as convenience API (caller blocks via `process.call`, agent processes asynchronously)
+- Added `send_message` for fire-and-forget usage
+
+**Server simplification:**
+- `server.gleam`: Removed blocking `send_run_turn` helper, `TurnComplete` custom message, and `turn_result_to_json`
+- User input now uses `agent.send_message` (fire-and-forget)
+- TurnStarted/TurnCompleted flow through the subscriber mechanism
+
+**Test updates:**
+- All `widget.dispatch_llm` calls pipe through `widget.resolve`
+- All `context.handle_tool_call` calls pattern match on `context.ToolCompleted`
+- Agent tests unchanged (run_turn API preserved)
 
 **Goal:** Replace the synchronous `do_run_turn` loop with a reactive actor that never blocks. No state machine — the agent simply reacts to each incoming message based on its current data.
 

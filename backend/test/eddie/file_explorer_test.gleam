@@ -41,6 +41,7 @@ pub fn open_directory_via_llm_test() {
   let args = make_args([#("path", json.string("."))])
   let #(updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "open_directory", args: args)
+    |> widget.resolve(dispatch_result: _)
   // CmdEffect runs do_open_directory(".") which should succeed
   result
   |> should.be_ok
@@ -58,6 +59,7 @@ pub fn open_directory_default_path_test() {
   let args = make_args([])
   let #(updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "open_directory", args: args)
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.be_ok
 
@@ -72,6 +74,7 @@ pub fn open_nonexistent_directory_test() {
   let args = make_args([#("path", json.string("/nonexistent_path_12345"))])
   let #(_updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "open_directory", args: args)
+    |> widget.resolve(dispatch_result: _)
   let assert Ok(text) = result
   string.contains(text, "Not a directory")
   |> should.be_true
@@ -86,6 +89,7 @@ pub fn read_file_via_llm_test() {
   let args = make_args([#("path", json.string("gleam.toml"))])
   let #(updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "read_file", args: args)
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Ok("Opened: gleam.toml"))
 
@@ -103,6 +107,7 @@ pub fn read_nonexistent_file_test() {
   let args = make_args([#("path", json.string("nonexistent_file.txt"))])
   let #(_updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "read_file", args: args)
+    |> widget.resolve(dispatch_result: _)
   let assert Ok(text) = result
   string.contains(text, "File not found")
   |> should.be_true
@@ -113,6 +118,7 @@ pub fn read_file_missing_path_test() {
   let args = make_args([])
   let #(_updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "read_file", args: args)
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Error("read_file: missing 'path' field"))
 }
@@ -127,6 +133,7 @@ pub fn close_directory_via_llm_test() {
   let args = make_args([#("path", json.string("."))])
   let #(updated, _) =
     widget.dispatch_llm(handle: handle, tool_name: "open_directory", args: args)
+    |> widget.resolve(dispatch_result: _)
   // Now close it
   let close_args = make_args([#("path", json.string("."))])
   let #(updated2, result) =
@@ -135,6 +142,7 @@ pub fn close_directory_via_llm_test() {
       tool_name: "close_directory",
       args: close_args,
     )
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Ok("Closed directory: ."))
 
@@ -154,6 +162,7 @@ pub fn close_nonexistent_directory_test() {
       tool_name: "close_directory",
       args: args,
     )
+    |> widget.resolve(dispatch_result: _)
   let assert Ok(text) = result
   string.contains(text, "No directory is open")
   |> should.be_true
@@ -165,6 +174,7 @@ pub fn close_read_file_via_llm_test() {
   let args = make_args([#("path", json.string("gleam.toml"))])
   let #(updated, _) =
     widget.dispatch_llm(handle: handle, tool_name: "read_file", args: args)
+    |> widget.resolve(dispatch_result: _)
   // Close it
   let close_args = make_args([#("path", json.string("gleam.toml"))])
   let #(updated2, result) =
@@ -173,6 +183,7 @@ pub fn close_read_file_via_llm_test() {
       tool_name: "close_read_file",
       args: close_args,
     )
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Ok("Closed: gleam.toml"))
 
@@ -191,6 +202,7 @@ pub fn reopen_directory_refreshes_test() {
   let args = make_args([#("path", json.string("."))])
   let #(updated, _) =
     widget.dispatch_llm(handle: handle, tool_name: "open_directory", args: args)
+    |> widget.resolve(dispatch_result: _)
   // Open same directory again — should replace, not duplicate
   let #(updated2, _) =
     widget.dispatch_llm(
@@ -198,6 +210,7 @@ pub fn reopen_directory_refreshes_test() {
       tool_name: "open_directory",
       args: args,
     )
+    |> widget.resolve(dispatch_result: _)
 
   let assert [message.Request(parts: [message.UserPart(text)])] =
     widget.view_messages(updated2)
@@ -247,6 +260,7 @@ pub fn unknown_tool_via_llm_test() {
   let args = make_args([])
   let #(_updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "unknown", args: args)
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Error("FileExplorer: unknown tool 'unknown'"))
 }

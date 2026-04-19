@@ -159,6 +159,7 @@ pub fn dispatch_llm_increments_counter_test() {
       tool_name: "increment",
       args: nil_dynamic(),
     )
+    |> widget.resolve(dispatch_result: _)
 
   // CmdNone → Ok("")
   result |> should.equal(Ok(""))
@@ -181,6 +182,7 @@ pub fn dispatch_llm_unknown_tool_returns_error_test() {
       tool_name: "unknown_tool",
       args: nil_dynamic(),
     )
+    |> widget.resolve(dispatch_result: _)
 
   result |> should.equal(Error("Unknown tool: unknown_tool"))
 }
@@ -211,6 +213,7 @@ pub fn dispatch_llm_with_tool_result_test() {
       tool_name: "set_count",
       args: nil_dynamic(),
     )
+    |> widget.resolve(dispatch_result: _)
 
   // CmdToolResult("Count set to 3")
   result |> should.equal(Ok("Count set to 3"))
@@ -283,18 +286,21 @@ pub fn multiple_dispatches_accumulate_state_test() {
       tool_name: "increment",
       args: nil_dynamic(),
     )
+    |> widget.resolve(dispatch_result: _)
   let #(handle, _) =
     widget.dispatch_llm(
       handle: handle,
       tool_name: "increment",
       args: nil_dynamic(),
     )
+    |> widget.resolve(dispatch_result: _)
   let #(handle, _) =
     widget.dispatch_llm(
       handle: handle,
       tool_name: "increment",
       args: nil_dynamic(),
     )
+    |> widget.resolve(dispatch_result: _)
 
   let messages = widget.view_messages(handle)
   case messages {

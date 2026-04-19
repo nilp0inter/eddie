@@ -23,6 +23,43 @@ import eddie/tool.{type ToolDefinition}
 import eddie_shared/message.{type Message}
 import eddie_shared/protocol.{type ServerEvent}
 
+/// Result of dispatching an LLM tool call through a widget.
+/// Completed means the tool call finished synchronously.
+/// EffectPending means an async effect needs to run before completion.
+pub type DispatchResult {
+  Completed(handle: WidgetHandle, result: Result(String, String))
+  EffectPending(
+    handle: WidgetHandle,
+    perform: fn() -> Dynamic,
+    resume: fn(Dynamic) -> DispatchResult,
+  )
+}
+
+/// Run a DispatchResult to completion synchronously.
+/// For Completed, returns immediately. For EffectPending, runs the
+/// effect inline and feeds the result back, repeating until Completed.
+pub fn resolve(
+  dispatch_result dispatch_result: DispatchResult,
+) -> #(WidgetHandle, Result(String, String)) {
+  case dispatch_result {
+    Completed(handle, result) -> #(handle, result)
+    EffectPending(_handle, perform, resume) -> {
+      let data = perform()
+      resolve(dispatch_result: resume(data))
+    }
+  }
+}
+
+/// Extract the widget handle from a DispatchResult regardless of variant.
+pub fn dispatch_result_handle(
+  dispatch_result dispatch_result: DispatchResult,
+) -> WidgetHandle {
+  case dispatch_result {
+    Completed(handle, _) -> handle
+    EffectPending(handle, _, _) -> handle
+  }
+}
+
 /// Configuration for creating a widget. All functions are required except
 /// where defaults make sense (e.g. a widget with no tools).
 pub type WidgetConfig(model, msg) {
@@ -57,8 +94,7 @@ pub opaque type WidgetHandle {
     view_messages_fn: fn() -> List(Message),
     view_tools_fn: fn() -> List(ToolDefinition),
     view_state_fn: fn() -> List(ServerEvent),
-    dispatch_llm_fn: fn(String, Dynamic) ->
-      #(WidgetHandle, Result(String, String)),
+    dispatch_llm_fn: fn(String, Dynamic) -> DispatchResult,
     dispatch_ui_fn: fn(String, Dynamic) -> #(WidgetHandle, Option(String)),
     send_fn: fn(Dynamic) -> Result(WidgetHandle, SendError),
     frontend_tool_names: Set(String),
@@ -102,12 +138,12 @@ pub fn protocol_free_tools(handle: WidgetHandle) -> Set(String) {
 
 /// Dispatch an LLM tool call through the widget.
 /// Runs from_llm -> update -> Cmd loop.
-/// Returns the updated handle and either Ok(tool_result) or Error(message).
+/// Returns a DispatchResult: either Completed or EffectPending.
 pub fn dispatch_llm(
   handle handle: WidgetHandle,
   tool_name tool_name: String,
   args args: Dynamic,
-) -> #(WidgetHandle, Result(String, String)) {
+) -> DispatchResult {
   { handle.dispatch_llm_fn }(tool_name, args)
 }
 
@@ -204,9 +240,13 @@ fn do_dispatch_llm(
   model model: model,
   tool_name tool_name: String,
   args args: Dynamic,
-) -> #(WidgetHandle, Result(String, String)) {
+) -> DispatchResult {
   case { fns.from_llm }(model, tool_name, args) {
-    Error(err) -> #(build_handle(fns: fns, model: model), Error(err))
+    Error(err) ->
+      Completed(
+        handle: build_handle(fns: fns, model: model),
+        result: Error(err),
+      )
     Ok(msg) -> {
       let #(new_model, cmd) = { fns.update }(model, msg)
       execute_cmd_loop(fns: fns, model: new_model, cmd: cmd)
@@ -245,8 +285,13 @@ fn do_dispatch_ui_event(
     None -> #(build_handle(fns: fns, model: model), None)
     Some(msg) -> {
       let #(new_model, cmd) = { fns.update }(model, msg)
+      // UI events run synchronously — resolve any effects inline
       let #(handle, result) =
-        execute_cmd_loop(fns: fns, model: new_model, cmd: cmd)
+        resolve(dispatch_result: execute_cmd_loop(
+          fns: fns,
+          model: new_model,
+          cmd: cmd,
+        ))
       // UI dispatches convert Ok to Some, and discard errors as None
       // because UI events don't have a channel to report errors through
       let ui_result = option.from_result(result)
@@ -272,22 +317,28 @@ fn do_send(
   }
 }
 
-/// Execute the Cmd loop: CmdNone returns empty, CmdToolResult returns text,
-/// CmdEffect runs the effect and feeds the result back into update.
+/// Execute the Cmd loop: CmdNone returns Completed with empty result,
+/// CmdToolResult returns Completed with text, CmdEffect returns
+/// EffectPending with the perform thunk and a resume continuation.
 fn execute_cmd_loop(
   fns fns: WidgetFns(model, msg),
   model model: model,
   cmd cmd: Cmd(msg),
-) -> #(WidgetHandle, Result(String, String)) {
+) -> DispatchResult {
   case cmd {
-    CmdNone -> #(build_handle(fns: fns, model: model), Ok(""))
-    CmdToolResult(text) -> #(build_handle(fns: fns, model: model), Ok(text))
-    CmdEffect(perform, to_msg) -> {
-      // Execute the effect synchronously (BEAM processes are lightweight)
-      let data = perform()
-      let msg = to_msg(data)
-      let #(new_model, next_cmd) = { fns.update }(model, msg)
-      execute_cmd_loop(fns: fns, model: new_model, cmd: next_cmd)
-    }
+    CmdNone ->
+      Completed(handle: build_handle(fns: fns, model: model), result: Ok(""))
+    CmdToolResult(text) ->
+      Completed(handle: build_handle(fns: fns, model: model), result: Ok(text))
+    CmdEffect(perform, to_msg) ->
+      EffectPending(
+        handle: build_handle(fns: fns, model: model),
+        perform: perform,
+        resume: fn(data) {
+          let msg = to_msg(data)
+          let #(new_model, next_cmd) = { fns.update }(model, msg)
+          execute_cmd_loop(fns: fns, model: new_model, cmd: next_cmd)
+        },
+      )
   }
 }

@@ -74,6 +74,7 @@ pub fn dispatch_llm_returns_error_test() {
       tool_name: "anything",
       args: nil_dynamic(),
     )
+    |> widget.resolve(dispatch_result: _)
 
   result |> should.be_error
 }

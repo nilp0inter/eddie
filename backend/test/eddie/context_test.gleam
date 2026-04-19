@@ -255,7 +255,7 @@ pub fn handle_tool_call_routes_to_conversation_log_test() {
   let ctx = create_default_context()
 
   // create_task is a conversation_log tool
-  let #(ctx, result) =
+  let assert context.ToolCompleted(ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "create_task",
@@ -275,14 +275,14 @@ pub fn handle_tool_call_routes_to_child_widget_test() {
   let ctx = create_context_with_counter()
 
   // First create and start a task (protocol requires active task)
-  let #(ctx, _) =
+  let assert context.ToolCompleted(ctx, _) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "create_task",
       args: make_args([#("description", json.string("test"))]),
       tool_call_id: "tc1",
     )
-  let #(ctx, _) =
+  let assert context.ToolCompleted(ctx, _) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "start_task",
@@ -291,7 +291,7 @@ pub fn handle_tool_call_routes_to_child_widget_test() {
     )
 
   // Now dispatch to the counter widget
-  let #(_ctx, result) =
+  let assert context.ToolCompleted(_ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "increment",
@@ -310,14 +310,14 @@ pub fn handle_tool_call_unknown_tool_test() {
   let ctx = create_default_context()
 
   // create+start task first
-  let #(ctx, _) =
+  let assert context.ToolCompleted(ctx, _) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "create_task",
       args: make_args([#("description", json.string("test"))]),
       tool_call_id: "tc1",
     )
-  let #(ctx, _) =
+  let assert context.ToolCompleted(ctx, _) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "start_task",
@@ -325,7 +325,7 @@ pub fn handle_tool_call_unknown_tool_test() {
       tool_call_id: "tc2",
     )
 
-  let #(_ctx, result) =
+  let assert context.ToolCompleted(_ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "nonexistent_tool",
@@ -348,7 +348,7 @@ pub fn protocol_rejects_tool_outside_task_test() {
   let ctx = create_context_with_counter()
 
   // No active task — should reject non-task tools
-  let #(_ctx, result) =
+  let assert context.ToolCompleted(_ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "increment",
@@ -367,7 +367,7 @@ pub fn protocol_allows_task_management_without_active_task_test() {
   let ctx = create_default_context()
 
   // create_task should always be allowed
-  let #(_ctx, result) =
+  let assert context.ToolCompleted(_ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "create_task",
@@ -386,7 +386,7 @@ pub fn protocol_allows_protocol_free_tools_without_task_test() {
     context.new(system_prompt: sp, children: [counter], conversation_log: log)
 
   // increment is protocol-free for this counter
-  let #(_ctx, result) =
+  let assert context.ToolCompleted(_ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "increment",
@@ -527,7 +527,7 @@ pub fn full_task_lifecycle_through_context_test() {
   let ctx = create_default_context()
 
   // Create task
-  let #(ctx, result) =
+  let assert context.ToolCompleted(ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "create_task",
@@ -537,7 +537,7 @@ pub fn full_task_lifecycle_through_context_test() {
   result |> should.be_ok
 
   // Start task
-  let #(ctx, result) =
+  let assert context.ToolCompleted(ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "start_task",
@@ -554,7 +554,7 @@ pub fn full_task_lifecycle_through_context_test() {
   let ctx = context.add_response(context: ctx, response: response)
 
   // Record memory
-  let #(ctx, result) =
+  let assert context.ToolCompleted(ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "task_memory",
@@ -571,7 +571,7 @@ pub fn full_task_lifecycle_through_context_test() {
   let ctx = context.add_tool_results(context: ctx, request: tool_results)
 
   // Close task
-  let #(ctx, result) =
+  let assert context.ToolCompleted(ctx, result) =
     context.handle_tool_call(
       context: ctx,
       tool_name: "close_current_task",

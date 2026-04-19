@@ -40,6 +40,7 @@ fn dispatch_create_task(
     tool_name: "create_task",
     args: make_args([#("description", json.string(description))]),
   )
+  |> widget.resolve(dispatch_result: _)
 }
 
 fn dispatch_start_task(
@@ -51,6 +52,7 @@ fn dispatch_start_task(
     tool_name: "start_task",
     args: make_args([#("task_id", json.int(task_id))]),
   )
+  |> widget.resolve(dispatch_result: _)
 }
 
 fn dispatch_task_memory(
@@ -62,6 +64,7 @@ fn dispatch_task_memory(
     tool_name: "task_memory",
     args: make_args([#("text", json.string(text))]),
   )
+  |> widget.resolve(dispatch_result: _)
 }
 
 fn dispatch_close_task(
@@ -72,6 +75,7 @@ fn dispatch_close_task(
     tool_name: "close_current_task",
     args: nil_args(),
   )
+  |> widget.resolve(dispatch_result: _)
 }
 
 fn dispatch_pick_task(
@@ -83,6 +87,7 @@ fn dispatch_pick_task(
     tool_name: "task_pick",
     args: make_args([#("task_id", json.int(task_id))]),
   )
+  |> widget.resolve(dispatch_result: _)
 }
 
 fn dispatch_remove_task(
@@ -94,6 +99,7 @@ fn dispatch_remove_task(
     tool_name: "remove_task",
     args: make_args([#("task_id", json.int(task_id))]),
   )
+  |> widget.resolve(dispatch_result: _)
 }
 
 fn send_user_message(
@@ -465,6 +471,7 @@ pub fn unknown_llm_tool_returns_error_test() {
       tool_name: "nonexistent",
       args: nil_args(),
     )
+    |> widget.resolve(dispatch_result: _)
 
   result |> should.be_error
 }

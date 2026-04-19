@@ -1,7 +1,9 @@
 /// HTTP server and WebSocket handler — serves the Eddie web UI.
 ///
 /// Uses mist for HTTP serving and WebSocket connections.
-/// Each WebSocket connection subscribes to the agent for HTML updates.
+/// Each WebSocket connection subscribes to the agent for state updates.
+/// The agent broadcasts all events (including TurnStarted/TurnCompleted)
+/// through the subscriber mechanism.
 import gleam/bytes_tree
 import gleam/dynamic/decode
 import gleam/erlang/process.{type Subject}
@@ -12,10 +14,8 @@ import gleam/option.{type Option, Some}
 import gleam/otp/actor
 import gleam/otp/static_supervisor.{type Supervisor}
 
-import eddie/agent.{type AgentMessage, type TurnResult}
+import eddie/agent.{type AgentMessage}
 import eddie/frontend
-import eddie_shared/protocol
-import eddie_shared/turn_result as shared_turn_result
 import mist
 
 /// Configuration for the web server.
@@ -66,19 +66,14 @@ fn not_found() -> response.Response(mist.ResponseData) {
 // WebSocket handler
 // ============================================================================
 
-/// Custom messages the WebSocket process receives from other processes.
+/// Custom messages the WebSocket process receives from the agent.
 type WsCustomMessage {
   StateUpdate(payload: String)
-  TurnComplete(result: TurnResult)
 }
 
 /// WebSocket connection state.
 type WsState {
-  WsState(
-    agent: Subject(AgentMessage),
-    update_subject: Subject(String),
-    turn_result_subject: Subject(TurnResult),
-  )
+  WsState(agent: Subject(AgentMessage), update_subject: Subject(String))
 }
 
 fn upgrade_websocket(
@@ -99,17 +94,13 @@ fn ws_init(
   agent_subject: Subject(AgentMessage),
   conn: mist.WebsocketConnection,
 ) -> #(WsState, Option(process.Selector(WsCustomMessage))) {
-  // Create subjects for receiving updates from the agent
+  // Create a subject for receiving state updates from the agent
   let update_subject = process.new_subject()
-  let turn_result_subject = process.new_subject()
 
-  // Build a selector that maps both subjects to WsCustomMessage
+  // Build a selector that maps updates to WsCustomMessage
   let selector =
     process.new_selector()
     |> process.select_map(update_subject, fn(payload) { StateUpdate(payload:) })
-    |> process.select_map(turn_result_subject, fn(result) {
-      TurnComplete(result:)
-    })
 
   // Subscribe to agent updates
   agent.subscribe(subject: agent_subject, subscriber: update_subject)
@@ -119,12 +110,7 @@ fn ws_init(
     agent.get_current_state(subject: agent_subject, timeout: 5000)
   let _sent = mist.send_text_frame(conn, initial_state)
 
-  let state =
-    WsState(
-      agent: agent_subject,
-      update_subject: update_subject,
-      turn_result_subject: turn_result_subject,
-    )
+  let state = WsState(agent: agent_subject, update_subject: update_subject)
   #(state, Some(selector))
 }
 
@@ -139,17 +125,12 @@ fn handle_ws_message(
 ) -> mist.Next(WsState, WsCustomMessage) {
   case msg {
     mist.Text(text) -> {
-      handle_client_message(state: state, text: text, conn: conn)
+      handle_client_message(state: state, text: text)
       mist.continue(state)
     }
     mist.Custom(StateUpdate(payload)) -> {
       // Best-effort send — connection may have closed
       let _sent = mist.send_text_frame(conn, payload)
-      mist.continue(state)
-    }
-    mist.Custom(TurnComplete(turn_result)) -> {
-      let response_json = turn_result_to_json(turn_result)
-      let _sent = mist.send_text_frame(conn, response_json)
       mist.continue(state)
     }
     mist.Binary(_) -> mist.continue(state)
@@ -160,11 +141,7 @@ fn handle_ws_message(
   }
 }
 
-fn handle_client_message(
-  state state: WsState,
-  text text: String,
-  conn conn: mist.WebsocketConnection,
-) -> Nil {
+fn handle_client_message(state state: WsState, text text: String) -> Nil {
   let user_input_decoder = decode.at(["user_input"], decode.string)
   let widget_event_decoder = {
     use event_name <- decode.field("event_name", decode.string)
@@ -174,15 +151,9 @@ fn handle_client_message(
 
   case json.parse(text, user_input_decoder) {
     Ok(user_text) -> {
-      // Best-effort send of thinking indicator
-      let turn_start_payload =
-        protocol.server_events_to_json_string([protocol.TurnStarted])
-      let _sent = mist.send_text_frame(conn, turn_start_payload)
-      send_run_turn(
-        agent_subject: state.agent,
-        text: user_text,
-        result_subject: state.turn_result_subject,
-      )
+      // Fire-and-forget — agent broadcasts TurnStarted/TurnCompleted
+      // through the subscriber mechanism
+      agent.send_message(subject: state.agent, text: user_text)
       Nil
     }
     Error(_) ->
@@ -198,31 +169,4 @@ fn handle_client_message(
         Error(_) -> Nil
       }
   }
-}
-
-/// Spawn a helper process that calls agent.run_turn (blocking) and
-/// forwards the result to the given subject. This avoids needing to
-/// construct opaque AgentMessage values directly.
-fn send_run_turn(
-  agent_subject agent_subject: Subject(AgentMessage),
-  text text: String,
-  result_subject result_subject: Subject(TurnResult),
-) -> Nil {
-  let _pid =
-    process.spawn(fn() {
-      // 5 minute timeout for a turn
-      let turn_result =
-        agent.run_turn(subject: agent_subject, text: text, timeout: 300_000)
-      process.send(result_subject, turn_result)
-    })
-  Nil
-}
-
-fn turn_result_to_json(result: TurnResult) -> String {
-  let shared_result = case result {
-    agent.TurnSuccess(text) -> shared_turn_result.TurnSuccess(text:)
-    agent.TurnError(reason) -> shared_turn_result.TurnError(reason:)
-  }
-  let event = protocol.TurnCompleted(result: shared_result)
-  protocol.server_events_to_json_string([event])
 }

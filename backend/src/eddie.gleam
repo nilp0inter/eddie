@@ -16,7 +16,7 @@ pub fn main() -> Nil {
 
   let model =
     get_env("EDDIE_MODEL")
-    |> result.unwrap("anthropic/claude-sonnet-4")
+    |> result.unwrap("x-ai/grok-4.1-fast")
 
   let port =
     get_env("EDDIE_PORT")

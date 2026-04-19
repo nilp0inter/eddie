@@ -4,33 +4,46 @@
 
 ### `eddie/agent`
 
-OTP actor that owns the agent state and runs the LLM turn loop. The actor processes one message at a time — the turn loop runs synchronously within the actor process, which is idiomatic for the BEAM (lightweight processes, no thread contention).
+Reactive OTP actor that owns the agent state and manages the LLM turn loop. The agent never blocks — LLM calls and tool effects are spawned as async processes that send results back as actor messages. User messages arriving during a turn are queued and processed after the current turn completes.
 
 - **`AgentConfig(llm_config, system_prompt)`** — configuration passed at start
 - **`AgentConfigOverride(model, api_base, system_prompt)`** — partial overrides for child agents (all fields `Option`). API key is always inherited
 - **`merge_config(parent, override)`** — produces a child `AgentConfig` from a parent config and an override (None fields inherit from parent)
-- **`AgentMessage`** — opaque message type with six variants:
-  - `RunTurn(text, reply_to)` — user message triggers a full turn loop
+- **`AgentMessage`** — opaque message type with eleven variants:
+  - `UserMessage(text, reply_to)` — user message with optional reply Subject
   - `GetState(reply_to)` — return current Context for inspection
   - `GetCurrentState(reply_to)` — return current widget state as a JSON-encoded `ServerEvent` list
   - `Subscribe(subscriber)` / `Unsubscribe(subscriber)` — register/unregister for state update notifications
   - `DispatchEvent(event_name, args_json)` — forward browser widget events
+  - `LlmResponse(response)` / `LlmError(reason)` — from spawned LLM call process
+  - `ToolEffectResult(call_id, data)` / `ToolEffectCrashed(call_id, reason)` — from spawned effect process
+  - `SetSelf(subject)` — agent learns its own Subject during init
 - **`TurnResult`** — `TurnSuccess(text)` | `TurnError(reason)`
-- **`start(config)`** — creates a Context with default widgets, starts the actor, returns `Result(Subject(AgentMessage), StartError)`
+- **`start(config)`** — creates a Context with default widgets, starts the actor, sends `SetSelf`, returns `Result(Subject(AgentMessage), StartError)`
 - **`start_with_send_fn(config, send_fn)`** — same but with an injectable HTTP sender for testing
-- **`run_turn(subject, text, timeout)`** — convenience wrapper around `process.call`
+- **`run_turn(subject, text, timeout)`** — convenience wrapper: sends `UserMessage` with a reply Subject, blocks the caller via `process.call` (the agent processes asynchronously)
+- **`send_message(subject, text)`** — fire-and-forget, no reply
 - **`get_current_state(subject, timeout)`** — returns the current widget state as a JSON-encoded `ServerEvent` list (used to populate the frontend on initial WebSocket connection)
 
-**Turn loop internals:**
+**Reactive turn internals:**
 
-The recursive turn loop (`turn_loop → do_turn_step → handle_llm_response → dispatch_tool_calls → turn_loop`) is capped at 25 iterations. Each iteration:
+The agent reacts to messages based on its current data rather than following a synchronous loop. The turn lifecycle is capped at 25 iterations:
 
-1. Compose messages and tools from the Context
-2. Build an HTTP request via `llm.build_request` and send via the injectable `send_fn`
-3. Parse the response (extracting both the message and token usage data); send usage to the token_usage widget
-4. Consume picks; record the response in the conversation log
-5. If tool calls: dispatch each through `context.handle_tool_call`, collect `ToolReturnPart`s, record tool results, continue loop
-6. If text only: extract text and return `TurnSuccess`
+1. `UserMessage` arrives — if idle, add to context, broadcast events, call `start_llm_call`; if busy, queue in `pending_user_messages`
+2. `start_llm_call` — compose messages and tools from Context, build HTTP request via `llm.build_request`, spawn a process to call `send_fn`, set `llm_in_flight = True`
+3. `LlmResponse` arrives — parse response, record token usage, add to context, notify subscribers
+4. If tool calls: dispatch each through `context.handle_tool_call` — completed tools are collected as `ToolReturnPart`s immediately; pending effects (`ToolEffectPending`) are spawned as async processes with resume continuations stored in `pending_effects`
+5. When all effects complete (`pending_effects` empty): record tool results in conversation log, increment iteration, call `start_llm_call` for the next round
+6. If text only: call `complete_turn` — broadcast `TurnCompleted`, reply to caller, drain next queued user message
+
+**Agent state bookkeeping:**
+
+- `llm_in_flight: Bool` — whether an LLM HTTP request is in flight
+- `pending_user_messages: List(#(String, Option(Subject(TurnResult))))` — queued user messages with optional reply Subjects
+- `pending_effects: Dict(String, EffectContinuation)` — in-flight tool effects keyed by call ID, each holding tool metadata and a `resume` closure
+- `collected_tool_parts: List(MessagePart)` — tool results collected during a dispatch round, recorded as a single message when all effects complete
+- `current_reply_to: Option(Subject(TurnResult))` — the reply Subject for the current turn's caller
+- `iteration: Int` — current turn iteration (reset to 0 for each user message)
 
 **Default widget tree:** `build_context` creates a Context with the system prompt, goal, file explorer, and token usage widgets as children, plus the conversation log.
 
@@ -38,7 +51,7 @@ The recursive turn loop (`turn_loop → do_turn_step → handle_llm_response →
 
 After each state mutation (user message added, response recorded, tool calls dispatched, tool results recorded), the agent computes `context.changed_state(old, new)` — which compares each widget's `view_state` output using structural equality — and sends the resulting `ServerEvent` list as a JSON-encoded string to all subscriber Subjects. This is a fire-and-forget push — subscribers are WebSocket handler processes that forward the JSON to the browser.
 
-During tool dispatch, the agent sends `ToolCallStarted` and `ToolCallCompleted` `ServerEvent`s to subscribers, giving visibility into the agent's actions during a turn. All notifications use the same JSON-encoded `ServerEvent` list format defined in `eddie_shared/protocol`.
+During tool dispatch, the agent sends `ToolCallStarted` and `ToolCallCompleted` `ServerEvent`s to subscribers, giving visibility into the agent's actions during a turn. `TurnStarted` and `TurnCompleted` are also broadcast through the subscriber mechanism. All notifications use the same JSON-encoded `ServerEvent` list format defined in `eddie_shared/protocol`.
 
 ### `eddie/server` and `eddie/frontend`
 
@@ -57,14 +70,16 @@ Mist HTTP and WebSocket server (`server.gleam`) plus a minimal browser frontend 
 
 **WebSocket protocol:**
 
-Each WebSocket connection is a separate BEAM process. On init, it creates two Subjects — one for state updates (`Subject(String)`), one for turn results (`Subject(TurnResult)`) — and builds a Selector that maps both to internal `WsCustomMessage` variants. The connection subscribes to the agent for state updates, then immediately sends the current widget state via `agent.get_current_state` so that the frontend is populated on first load (without this, the frontend would remain empty until the first state mutation).
+Each WebSocket connection is a separate BEAM process. On init, it creates a Subject for state updates (`Subject(String)`) and builds a Selector mapping it to `StateUpdate`. The connection subscribes to the agent for state updates, then immediately sends the current widget state via `agent.get_current_state` so that the frontend is populated on first load (without this, the frontend would remain empty until the first state mutation).
 
 *Client → Server messages (JSON over WebSocket):*
 
 | Key | Payload | Effect |
 |---|---|---|
-| `user_input` | `{"user_input": "text"}` | Spawns a helper process that calls `agent.run_turn` and sends the result to the turn result Subject |
+| `user_input` | `{"user_input": "text"}` | Calls `agent.send_message` (fire-and-forget) |
 | `widget_event` | `{"widget_event": {"event_name": "...", "args_json": "..."}}` | Forwards to `agent.dispatch_event` |
+
+Turn lifecycle events (`TurnStarted`, `TurnCompleted`) flow through the subscriber mechanism — the server does not need to track turn state separately.
 
 *Server → Client messages:*
 
@@ -266,7 +281,8 @@ The root compositor — the glue between widgets and the agent loop. Holds a sys
 - **`view_tools`** — collects tool definitions from all widgets
 - **`add_user_message` / `add_response` / `add_tool_results`** — record items in the conversation log, tagged with the current owning task ID
 - **`consume_picks`** — clears one-shot task expansions after a request/response round-trip
-- **`handle_tool_call(context, tool_name, args, tool_call_id)`** — enforces the task protocol via `conversation_log.protocol_check`, then routes to the owning widget. Returns `#(Context, Result(String, String))`
+- **`handle_tool_call(context, tool_name, args, tool_call_id)`** — enforces the task protocol via `conversation_log.protocol_check`, then routes to the owning widget. Returns `ToolDispatchResult`: either `ToolCompleted(context, result)` or `ToolEffectPending(context, tool_name, tool_call_id, owner_id, perform, resume)`
+- **`replace_widget(context, owner_id, handle)`** — replaces a widget handle by owner ID. Used by the agent to insert updated handles after async effects complete
 - **`handle_widget_event`** — dispatches browser UI events to all widgets (no protocol enforcement)
 - **`current_state(context)`** — returns the current state events for all widgets as a flat `List(ServerEvent)` (used for initial WebSocket connect)
 - **`changed_state(old, new)`** — compares each widget's `view_state` output using structural equality, returns events from widgets whose state differs
@@ -340,12 +356,18 @@ The central abstraction. Defines both the typed configuration and the type-erase
 - `protocol_free_tools: Set(String)` — tool names exempt from task protocol
 
 **`WidgetHandle`** — opaque, type-erased via closures. Context holds a list of these. Internally uses a `WidgetFns` record to bundle the function table, avoiding excessive parameter threading. Key operations:
-- `dispatch_llm(handle, tool_name, args)` — runs from_llm -> update -> Cmd loop
-- `dispatch_ui(handle, event_name, args)` — checks frontend_tools, runs from_ui -> update -> Cmd loop
+- `dispatch_llm(handle, tool_name, args)` — runs from_llm -> update -> Cmd loop, returns `DispatchResult`
+- `dispatch_ui(handle, event_name, args)` — checks frontend_tools, runs from_ui -> update -> Cmd loop (resolves effects synchronously)
 - `send(handle, msg)` — direct dispatch, must produce CmdNone
 - `view_messages`, `view_tools`, `view_state` — produce widget output
+- `resolve(dispatch_result)` — runs a `DispatchResult` to completion synchronously (used by `dispatch_ui` and tests)
+- `dispatch_result_handle(dispatch_result)` — extracts the handle from either `Completed` or `EffectPending`
 
-The Cmd loop executes `CmdEffect` synchronously within the closure. This is safe because BEAM processes are lightweight and the agent GenServer (Phase 4) will own the execution context.
+**`DispatchResult`** — the return type of `dispatch_llm`:
+- `Completed(handle, result)` — the tool call finished; `result` is `Ok(text)` or `Error(message)`
+- `EffectPending(handle, perform, resume)` — a `CmdEffect` needs to run asynchronously; `perform` is the effect thunk, `resume` is a continuation that accepts the effect's result and returns the next `DispatchResult`
+
+When the agent dispatches an LLM tool call, the widget's Cmd loop yields `EffectPending` for `CmdEffect` commands instead of running them inline. The agent spawns a process for the effect and stores the `resume` continuation. When the effect completes, the agent calls `resume(data)` to continue the Cmd loop. For UI events (`dispatch_ui`), effects are resolved synchronously via `resolve`.
 
 ### `eddie/coerce`
 

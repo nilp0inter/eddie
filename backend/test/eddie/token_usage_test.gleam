@@ -86,6 +86,7 @@ pub fn from_llm_always_errors_test() {
   let args = dynamic.string("test")
   let #(_updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "anything", args: args)
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Error("TokenUsage has no LLM tools"))
 }

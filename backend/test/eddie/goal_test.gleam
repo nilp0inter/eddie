@@ -47,6 +47,7 @@ pub fn set_goal_via_llm_test() {
     |> unwrap_ok
   let #(updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "set_goal", args: args)
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Ok("Goal set: Ship v2"))
 
@@ -62,6 +63,7 @@ pub fn clear_goal_via_llm_test() {
   let args = empty_args()
   let #(updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "clear_goal", args: args)
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Ok("Goal cleared"))
 
@@ -76,6 +78,7 @@ pub fn unknown_tool_via_llm_test() {
   let args = empty_args()
   let #(_updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "unknown", args: args)
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Error("Goal: unknown tool 'unknown'"))
 }
@@ -85,6 +88,7 @@ pub fn set_goal_missing_field_via_llm_test() {
   let args = empty_args()
   let #(_updated, result) =
     widget.dispatch_llm(handle: handle, tool_name: "set_goal", args: args)
+    |> widget.resolve(dispatch_result: _)
   result
   |> should.equal(Error("set_goal: missing or invalid 'goal' field"))
 }
