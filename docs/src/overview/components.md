@@ -9,15 +9,17 @@ OTP actor that owns the agent state and runs the LLM turn loop. The actor proces
 - **`AgentConfig(llm_config, system_prompt)`** — configuration passed at start
 - **`AgentConfigOverride(model, api_base, system_prompt)`** — partial overrides for child agents (all fields `Option`). API key is always inherited
 - **`merge_config(parent, override)`** — produces a child `AgentConfig` from a parent config and an override (None fields inherit from parent)
-- **`AgentMessage`** — opaque message type with five variants:
+- **`AgentMessage`** — opaque message type with six variants:
   - `RunTurn(text, reply_to)` — user message triggers a full turn loop
   - `GetState(reply_to)` — return current Context for inspection
+  - `GetCurrentHtml(reply_to)` — return current widget HTML as an OOB-swap payload string
   - `Subscribe(subscriber)` / `Unsubscribe(subscriber)` — register/unregister for HTML update notifications
   - `DispatchEvent(event_name, args_json)` — forward browser widget events
 - **`TurnResult`** — `TurnSuccess(text)` | `TurnError(reason)`
 - **`start(config)`** — creates a Context with default widgets, starts the actor, returns `Result(Subject(AgentMessage), StartError)`
 - **`start_with_send_fn(config, send_fn)`** — same but with an injectable HTTP sender for testing
 - **`run_turn(subject, text, timeout)`** — convenience wrapper around `process.call`
+- **`get_current_html(subject, timeout)`** — returns the current widget HTML as a single OOB-swap payload string (used to populate widget panels on initial WebSocket connection)
 
 **Turn loop internals:**
 
@@ -55,7 +57,7 @@ Mist HTTP and WebSocket server. Thin glue between the browser and the agent acto
 
 **WebSocket protocol:**
 
-Each WebSocket connection is a separate BEAM process. On init, it creates two Subjects — one for HTML updates (`Subject(String)`), one for turn results (`Subject(TurnResult)`) — and builds a Selector that maps both to internal `WsCustomMessage` variants. The connection subscribes to the agent for HTML updates.
+Each WebSocket connection is a separate BEAM process. On init, it creates two Subjects — one for HTML updates (`Subject(String)`), one for turn results (`Subject(TurnResult)`) — and builds a Selector that maps both to internal `WsCustomMessage` variants. The connection subscribes to the agent for HTML updates, then immediately sends the current widget HTML via `agent.get_current_html` so that all widget panels are populated on first load (without this, panels would remain empty until the first state mutation).
 
 *Client → Server messages (JSON over WebSocket):*
 
@@ -271,6 +273,7 @@ The root compositor — the glue between widgets and the agent loop. Holds a sys
 - **`consume_picks`** — clears one-shot task expansions after a request/response round-trip
 - **`handle_tool_call(context, tool_name, args, tool_call_id)`** — enforces the task protocol via `conversation_log.protocol_check`, then routes to the owning widget. Returns `#(Context, Result(String, String))`
 - **`handle_widget_event`** — dispatches browser UI events to all widgets (no protocol enforcement)
+- **`current_html(context)`** — returns the current HTML for all widgets as `List(#(String, Element(Nil)))` (used for initial page load)
 - **`changed_html(old, new)`** — detects which widgets' HTML changed between two snapshots
 
 The conversation log is stored as a typed `ConversationLog` (not a `WidgetHandle`) so Context can access protocol checking and the owning task ID directly. See [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md) for the rationale.

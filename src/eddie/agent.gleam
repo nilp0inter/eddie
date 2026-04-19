@@ -74,6 +74,7 @@ pub type TurnResult {
 pub opaque type AgentMessage {
   RunTurn(text: String, reply_to: Subject(TurnResult))
   GetState(reply_to: Subject(Context))
+  GetCurrentHtml(reply_to: Subject(String))
   Subscribe(subscriber: Subject(String))
   Unsubscribe(subscriber: Subject(String))
   DispatchEvent(event_name: String, args_json: String)
@@ -146,6 +147,16 @@ pub fn get_state(
   })
 }
 
+/// Get the current HTML for all widgets as a single OOB-swap payload.
+pub fn get_current_html(
+  subject subject: Subject(AgentMessage),
+  timeout timeout: Int,
+) -> String {
+  process.call(subject, waiting: timeout, sending: fn(reply_to) {
+    GetCurrentHtml(reply_to:)
+  })
+}
+
 /// Register a subscriber to receive HTML updates.
 pub fn subscribe(
   subject subject: Subject(AgentMessage),
@@ -187,6 +198,22 @@ fn handle_message(
     }
     GetState(reply_to) -> {
       process.send(reply_to, state.context)
+      actor.continue(state)
+    }
+    GetCurrentHtml(reply_to) -> {
+      let entries = context.current_html(context: state.context)
+      let html_payload =
+        list.map(entries, fn(entry) {
+          let #(id, el) = entry
+          let inner_html = element.to_string(el)
+          "<div id=\"widget-"
+          <> id
+          <> "\" data-swap-oob=\"true\">"
+          <> inner_html
+          <> "</div>"
+        })
+        |> string.join("")
+      process.send(reply_to, html_payload)
       actor.continue(state)
     }
     Subscribe(subscriber) -> {

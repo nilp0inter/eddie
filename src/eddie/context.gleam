@@ -192,6 +192,12 @@ pub fn handle_widget_event(
 
 /// Detect which widgets changed their HTML between two context snapshots.
 /// Returns a list of (widget_id, new_html) pairs for widgets whose HTML differs.
+/// Get the current HTML for all widgets (used for initial page load).
+pub fn current_html(context context: Context) -> List(#(String, Element(Nil))) {
+  all_widget_html_entries(context)
+  |> list.map(fn(entry) { #(entry.id, entry.element) })
+}
+
 pub fn changed_html(
   old old: Context,
   new new: Context,

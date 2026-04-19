@@ -85,13 +85,14 @@ fn upgrade_websocket(
     handler: fn(state, msg, conn) {
       handle_ws_message(state: state, msg: msg, conn: conn)
     },
-    on_init: fn(_conn) { ws_init(agent) },
+    on_init: fn(conn) { ws_init(agent, conn) },
     on_close: fn(state) { ws_close(state) },
   )
 }
 
 fn ws_init(
-  agent: Subject(AgentMessage),
+  agent_subject: Subject(AgentMessage),
+  conn: mist.WebsocketConnection,
 ) -> #(WsState, Option(process.Selector(WsCustomMessage))) {
   // Create subjects for receiving updates from the agent
   let update_subject = process.new_subject()
@@ -106,11 +107,16 @@ fn ws_init(
     })
 
   // Subscribe to agent updates
-  agent.subscribe(subject: agent, subscriber: update_subject)
+  agent.subscribe(subject: agent_subject, subscriber: update_subject)
+
+  // Send initial widget HTML so panels are populated immediately
+  let initial_html =
+    agent.get_current_html(subject: agent_subject, timeout: 5000)
+  let _sent = mist.send_text_frame(conn, initial_html)
 
   let state =
     WsState(
-      agent: agent,
+      agent: agent_subject,
       update_subject: update_subject,
       turn_result_subject: turn_result_subject,
     )
