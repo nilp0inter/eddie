@@ -872,8 +872,12 @@ fn yield_raw(group: List(LogItem)) -> List(Message) {
     case item {
       UserMessageItem(text, _) ->
         Ok(message.Request(parts: [message.UserPart(text)]))
-      SystemMessageItem(text, _, _) ->
-        Ok(message.Request(parts: [message.SystemPart(text)]))
+      SystemMessageItem(text, from, _) ->
+        Ok(
+          message.Request(parts: [
+            message.UserPart("From " <> from <> ":\n" <> text),
+          ]),
+        )
       ResponseItem(response, _) -> Ok(response)
       ToolResultsItem(request, _) -> Ok(request)
     }
