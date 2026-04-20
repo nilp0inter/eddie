@@ -143,19 +143,23 @@ fn index_html() -> String {
     .token-summary > div { margin-bottom: 4px; }
     .chat { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
     .chat-log { flex: 1; overflow-y: auto; padding: 16px; }
-    .msg { margin-bottom: 16px; }
+    .msg { margin-bottom: 12px; display: flex; flex-direction: column; }
     .msg-role { font-size: 11px; font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .msg-user, .msg-system { text-align: right; }
+    .msg-user, .msg-system { align-items: flex-end; }
+    .msg-assistant { align-items: flex-start; }
+    .msg-user .msg-content { background: #1e66f5; color: #ffffff; border-radius: 12px 12px 2px 12px; }
+    .msg-system .msg-content { background: #1e66f5cc; color: #ffffff; border-radius: 12px 12px 2px 12px; }
+    .msg-assistant .msg-content { background: #313244; color: #cdd6f4; border-radius: 12px 12px 12px 2px; }
     .msg-user .msg-role { color: #89b4fa; }
     .msg-system .msg-role { color: #94e2d5; }
     .msg-assistant .msg-role { color: #cba6f7; }
-    .msg-content { font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+    .msg-content { max-width: 80%; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; padding: 8px 12px; text-align: left; }
     .msg-content p { margin-bottom: 8px; }
     .msg-content p:last-child { margin-bottom: 0; }
     .tool-calls { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
     .tool-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #31324480; color: #a6adc8; }
     .tool-badge.running { background: #cba6f71a; color: #cba6f7; }
-    .msg-tool-results { margin-bottom: 12px; }
+    .msg-tool-results { margin-bottom: 12px; max-width: 80%; }
     .tool-result { font-size: 12px; margin-bottom: 4px; }
     .tool-result summary { cursor: pointer; color: #a6adc8; }
     .tool-result pre { margin-top: 4px; padding: 8px; background: #11111b; border-radius: 4px; font-size: 11px; overflow-x: auto; max-height: 200px; overflow-y: auto; }
