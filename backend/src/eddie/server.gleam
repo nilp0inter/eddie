@@ -54,7 +54,7 @@ fn handle_request(
     ["agents"] -> serve_agents(tree)
     ["ws", "control"] -> upgrade_control_websocket(req, tree)
     ["ws", agent_id] -> upgrade_agent_websocket(req, tree, agent_id)
-    _ -> not_found()
+    _ -> serve_index()
   }
 }
 
@@ -87,11 +87,6 @@ fn serve_agents(
   response.new(200)
   |> response.set_header("content-type", "application/json")
   |> response.set_body(mist.Bytes(bytes_tree.from_string(body)))
-}
-
-fn not_found() -> response.Response(mist.ResponseData) {
-  response.new(404)
-  |> response.set_body(mist.Bytes(bytes_tree.from_string("Not Found")))
 }
 
 fn index_html() -> String {

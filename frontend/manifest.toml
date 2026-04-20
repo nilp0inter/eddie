@@ -11,6 +11,7 @@ packages = [
   { name = "houdini", version = "1.2.1", build_tools = ["gleam"], requirements = [], otp_app = "houdini", source = "hex", outer_checksum = "6F8AC2F12974567FB744BEA66AC93CEB76AAEA19AD28564623F76CDA9BC26A85" },
   { name = "lustre", version = "5.6.0", build_tools = ["gleam"], requirements = ["gleam_erlang", "gleam_json", "gleam_otp", "gleam_stdlib", "houdini"], otp_app = "lustre", source = "hex", outer_checksum = "EE558CD4DB9F09FCC16417ADF0183A3C2DAC3E4B21ED3AC0CAE859792AB810CA" },
   { name = "lustre_websocket", version = "0.9.0", build_tools = ["gleam"], requirements = ["gleam_stdlib", "lustre"], otp_app = "lustre_websocket", source = "hex", outer_checksum = "7C986F711ACCF7F4EF4C24BDE0BE1D25D805A92ED3BFFE10BE61EBE1E92065D6" },
+  { name = "modem", version = "2.1.2", build_tools = ["gleam"], requirements = ["gleam_stdlib", "lustre"], otp_app = "modem", source = "hex", outer_checksum = "3F9682EBCBF4D26045F1038A7507E8C7967E49D43F9CA6BA68EF0C971B195A7F" },
 ]
 
 [requirements]
@@ -20,3 +21,4 @@ gleam_stdlib = { version = ">= 0.59.0 and < 1.0.0" }
 gleeunit = { version = ">= 1.0.0 and < 2.0.0" }
 lustre = { version = ">= 5.6.0 and < 6.0.0" }
 lustre_websocket = { version = ">= 0.9.0 and < 1.0.0" }
+modem = { version = ">= 2.0.0 and < 3.0.0" }

@@ -75,7 +75,7 @@ Mist HTTP and WebSocket server. The server is thin glue between the Lustre SPA f
 | `GET` | `/agents` | Returns JSON array of `AgentTreeNode` records (rose-tree forest) |
 | `GET` | `/ws/control` | Control WebSocket — tree change events, root agent spawning |
 | `GET` | `/ws/<agent_id>` | Agent WebSocket — per-agent state updates and commands (returns 404 if agent not found) |
-| `*` | `*` | 404 |
+| `*` | `*` | Serves the HTML shell (SPA fallback for client-side routing) |
 
 **Control WebSocket (`/ws/control`):**
 
@@ -109,8 +109,10 @@ Two-page Lustre application (`frontend/src/eddie_frontend.gleam`) with a landing
 
 **Page navigation:**
 
-- `AgentListPage` — landing page showing the rose-tree forest of agents. A "+" button sends `SpawnRootAgent` via the control WebSocket. Clicking an agent card navigates to its conversation
-- `AgentConversationPage(agent_id)` — chat UI with sidebar panels. A back button returns to the agent list
+- `AgentListPage` (`/`) — landing page showing the rose-tree forest of agents. A "+" button sends `SpawnRootAgent` via the control WebSocket. Clicking an agent card navigates to its conversation
+- `AgentConversationPage(agent_id)` (`/agent/<agent_id>`) — chat UI with sidebar panels. A back button returns to the agent list
+
+URL-based routing uses the `modem` library. The URL reflects the current page — navigating to an agent pushes `/agent/<id>` to the browser history, and navigating back pushes `/`. On page load, `modem.initial_uri()` reads the current URL to restore the correct page (including the agent WebSocket connection). Browser back/forward buttons trigger `UrlChanged` messages via `modem.init`, which navigate without pushing duplicate history entries. The backend serves the SPA HTML for all unmatched paths, enabling deep links and F5 refresh.
 
 **Two WebSocket connections:**
 

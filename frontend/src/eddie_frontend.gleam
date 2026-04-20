@@ -22,6 +22,7 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import gleam/uri
 import lustre
 import lustre/attribute.{type Attribute}
 import lustre/effect.{type Effect}
@@ -29,6 +30,7 @@ import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
 import lustre_websocket as ws
+import modem
 
 // ============================================================================
 // FFI
@@ -172,6 +174,7 @@ type Msg {
   // Navigation
   NavigateToAgent(String)
   NavigateToList
+  UrlChanged(Page)
   // Agent list actions
   CreateRootAgent
   // Chat
@@ -185,15 +188,95 @@ type Msg {
 // Init
 // ============================================================================
 
+fn on_url_change(uri: uri.Uri) -> Msg {
+  case uri.path_segments(uri.path) {
+    ["agent", agent_id] -> UrlChanged(AgentConversationPage(agent_id))
+    _ -> UrlChanged(AgentListPage)
+  }
+}
+
 fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
-  let model = empty_model()
-  #(
-    model,
-    effect.batch([
-      ws.init("/ws/control", ControlWsEvent),
-      delay_effect(ControlCheckConnection(model.control_ws_generation), 3000),
-    ]),
-  )
+  let model = case modem.initial_uri() {
+    Ok(uri) ->
+      case uri.path_segments(uri.path) {
+        ["agent", agent_id] ->
+          Model(..empty_model(), page: AgentConversationPage(agent_id))
+        _ -> empty_model()
+      }
+    Error(_) -> empty_model()
+  }
+  let initial_effects = [
+    modem.init(on_url_change),
+    ws.init("/ws/control", ControlWsEvent),
+    delay_effect(ControlCheckConnection(model.control_ws_generation), 3000),
+  ]
+  let effects = case model.page {
+    AgentConversationPage(agent_id) -> [
+      ws.init("/ws/" <> agent_id, AgentWsEvent),
+      delay_effect(AgentCheckConnection(model.agent_ws_generation), 3000),
+      ..initial_effects
+    ]
+    AgentListPage -> initial_effects
+  }
+  #(model, effect.batch(effects))
+}
+
+fn navigate_to_page(
+  model: Model,
+  page: Page,
+  push_url: Bool,
+) -> #(Model, Effect(Msg)) {
+  let close_effect = case model.agent_ws {
+    Some(socket) ->
+      effect.from(fn(_dispatch) {
+        ws.close(socket)
+        Nil
+      })
+    None -> effect.none()
+  }
+  case page {
+    AgentConversationPage(agent_id) -> {
+      let new_gen = model.agent_ws_generation + 1
+      let new_model =
+        Model(
+          ..model,
+          page: page,
+          agent_ws: None,
+          agent_connection: Connecting,
+          agent_ws_generation: new_gen,
+          agents: dict.insert(model.agents, agent_id, empty_agent_state()),
+          active_panel: None,
+        )
+      let push_effect = case push_url {
+        True -> modem.push("/agent/" <> agent_id, None, None)
+        False -> effect.none()
+      }
+      #(
+        new_model,
+        effect.batch([
+          close_effect,
+          push_effect,
+          ws.init("/ws/" <> agent_id, AgentWsEvent),
+          delay_effect(AgentCheckConnection(new_gen), 3000),
+        ]),
+      )
+    }
+    AgentListPage -> {
+      let push_effect = case push_url {
+        True -> modem.push("/", None, None)
+        False -> effect.none()
+      }
+      #(
+        Model(
+          ..model,
+          page: AgentListPage,
+          agent_ws: None,
+          agent_connection: Disconnected,
+        ),
+        effect.batch([close_effect, push_effect]),
+      )
+    }
+  }
 }
 
 // ============================================================================
@@ -347,57 +430,16 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
 
     // -- Navigation ---------------------------------------------------------
-    NavigateToAgent(agent_id) -> {
-      // Close existing agent WS if open (prevents stale events from
-      // a previous agent being folded into the new agent's state)
-      let close_effect = case model.agent_ws {
-        Some(socket) ->
-          effect.from(fn(_dispatch) {
-            ws.close(socket)
-            Nil
-          })
-        None -> effect.none()
-      }
-      let new_gen = model.agent_ws_generation + 1
-      let new_model =
-        Model(
-          ..model,
-          page: AgentConversationPage(agent_id),
-          agent_ws: None,
-          agent_connection: Connecting,
-          agent_ws_generation: new_gen,
-          agents: dict.insert(model.agents, agent_id, empty_agent_state()),
-          active_panel: None,
-        )
-      #(
-        new_model,
-        effect.batch([
-          close_effect,
-          ws.init("/ws/" <> agent_id, AgentWsEvent),
-          delay_effect(AgentCheckConnection(new_gen), 3000),
-        ]),
-      )
-    }
+    NavigateToAgent(agent_id) ->
+      navigate_to_page(model, AgentConversationPage(agent_id), True)
 
-    NavigateToList -> {
-      let close_effect = case model.agent_ws {
-        Some(socket) ->
-          effect.from(fn(_dispatch) {
-            ws.close(socket)
-            Nil
-          })
-        None -> effect.none()
+    NavigateToList -> navigate_to_page(model, AgentListPage, True)
+
+    UrlChanged(page) ->
+      case page == model.page {
+        True -> #(model, effect.none())
+        False -> navigate_to_page(model, page, False)
       }
-      #(
-        Model(
-          ..model,
-          page: AgentListPage,
-          agent_ws: None,
-          agent_connection: Disconnected,
-        ),
-        close_effect,
-      )
-    }
 
     // -- Agent list actions -------------------------------------------------
     CreateRootAgent -> {
