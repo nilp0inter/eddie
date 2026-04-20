@@ -121,6 +121,7 @@ fn update(
                   SendResult(result: mailbox_broker.send_mail(
                     broker: broker,
                     from: from,
+                    from_label: from,
                     to: child_id,
                     content: content,
                   )),

@@ -96,6 +96,17 @@ pub fn add_user_message(context context: Context, text text: String) -> Context 
   rebuild_tool_owners(Context(..context, log: new_log))
 }
 
+/// Record a system message in the conversation log.
+pub fn add_system_message(
+  context context: Context,
+  text text: String,
+  from from: String,
+) -> Context {
+  let msg = conversation_log.SystemMessageReceived(text: text, from: from)
+  let new_log = conversation_log.send_msg(log: context.log, msg: msg)
+  rebuild_tool_owners(Context(..context, log: new_log))
+}
+
 /// Record an LLM response in the conversation log.
 pub fn add_response(
   context context: Context,

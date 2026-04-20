@@ -17,6 +17,7 @@ pub fn send_and_read_test() {
     mailbox_broker.send_mail(
       broker: broker,
       from: "parent-1",
+      from_label: "Parent",
       to: "child-1",
       content: "Hello child",
     )
@@ -42,6 +43,7 @@ pub fn send_and_read_unread_test() {
     mailbox_broker.send_mail(
       broker: broker,
       from: "parent-1",
+      from_label: "Parent",
       to: "child-1",
       content: "Message 1",
     )
@@ -60,6 +62,7 @@ pub fn outbox_test() {
     mailbox_broker.send_mail(
       broker: broker,
       from: "parent-1",
+      from_label: "Parent",
       to: "child-1",
       content: "Outgoing",
     )
@@ -81,6 +84,7 @@ pub fn mark_read_test() {
     mailbox_broker.send_mail(
       broker: broker,
       from: "a",
+      from_label: "Agent A",
       to: "b",
       content: "test",
     )
@@ -171,6 +175,7 @@ pub fn tree_integration_mail_delivery_test() {
     mailbox_broker.send_mail(
       broker: broker,
       from: "parent-1",
+      from_label: "Parent",
       to: "child-1",
       content: "Hello from parent",
     )
@@ -202,6 +207,7 @@ pub fn multiple_messages_chronological_test() {
     mailbox_broker.send_mail(
       broker: broker,
       from: "a",
+      from_label: "Agent A",
       to: "b",
       content: "First",
     )
@@ -209,6 +215,7 @@ pub fn multiple_messages_chronological_test() {
     mailbox_broker.send_mail(
       broker: broker,
       from: "a",
+      from_label: "Agent A",
       to: "b",
       content: "Second",
     )

@@ -15,6 +15,8 @@ pub type MailMessage {
     id: String,
     /// Sender agent ID.
     from: String,
+    /// Human-readable sender label.
+    from_label: String,
     /// Recipient agent ID.
     to: String,
     /// Free-form message content.
@@ -34,6 +36,7 @@ pub fn mail_message_to_json(msg: MailMessage) -> json.Json {
   json.object([
     #("id", json.string(msg.id)),
     #("from", json.string(msg.from)),
+    #("from_label", json.string(msg.from_label)),
     #("to", json.string(msg.to)),
     #("content", json.string(msg.content)),
     #("timestamp", json.int(msg.timestamp)),
@@ -48,9 +51,18 @@ pub fn mail_message_to_json(msg: MailMessage) -> json.Json {
 pub fn mail_message_decoder() -> decode.Decoder(MailMessage) {
   use id <- decode.field("id", decode.string)
   use from <- decode.field("from", decode.string)
+  use from_label <- decode.field("from_label", decode.string)
   use to <- decode.field("to", decode.string)
   use content <- decode.field("content", decode.string)
   use timestamp <- decode.field("timestamp", decode.int)
   use read <- decode.field("read", decode.bool)
-  decode.success(MailMessage(id:, from:, to:, content:, timestamp:, read:))
+  decode.success(MailMessage(
+    id:,
+    from:,
+    to:,
+    content:,
+    timestamp:,
+    read:,
+    from_label:,
+  ))
 }

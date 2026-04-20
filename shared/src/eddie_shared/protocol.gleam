@@ -148,6 +148,7 @@ pub type TaskSnapshot {
 /// A log entry as seen by the frontend.
 pub type LogItemSnapshot {
   UserMessageSnapshot(text: String, owning_task_id: Option(Int))
+  SystemMessageSnapshot(text: String, from: String, owning_task_id: Option(Int))
   ResponseSnapshot(response: Message, owning_task_id: Option(Int))
   ToolResultsSnapshot(request: Message, owning_task_id: Option(Int))
 }
@@ -205,6 +206,13 @@ pub fn log_item_snapshot_to_json(item: LogItemSnapshot) -> json.Json {
       json.object([
         #("type", json.string("user_message")),
         #("text", json.string(text)),
+        #("owning_task_id", option_int_to_json(owning_task_id)),
+      ])
+    SystemMessageSnapshot(text, from, owning_task_id) ->
+      json.object([
+        #("type", json.string("system_message")),
+        #("text", json.string(text)),
+        #("from", json.string(from)),
         #("owning_task_id", option_int_to_json(owning_task_id)),
       ])
     ResponseSnapshot(response, owning_task_id) ->
@@ -530,6 +538,15 @@ pub fn log_item_snapshot_decoder() -> decode.Decoder(LogItemSnapshot) {
         decode.optional(decode.int),
       )
       decode.success(UserMessageSnapshot(text:, owning_task_id:))
+    }
+    "system_message" -> {
+      use text <- decode.field("text", decode.string)
+      use from <- decode.field("from", decode.string)
+      use owning_task_id <- decode.field(
+        "owning_task_id",
+        decode.optional(decode.int),
+      )
+      decode.success(SystemMessageSnapshot(text:, from:, owning_task_id:))
     }
     "response" -> {
       use response <- decode.field("response", message.message_decoder())

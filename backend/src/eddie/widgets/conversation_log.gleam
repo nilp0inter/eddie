@@ -40,6 +40,7 @@ import eddie_shared/task.{
 /// One chronological log entry. Exactly one payload variant.
 pub type LogItem {
   UserMessageItem(text: String, owning_task_id: Option(Int))
+  SystemMessageItem(text: String, from: String, owning_task_id: Option(Int))
   ResponseItem(response: Message, owning_task_id: Option(Int))
   ToolResultsItem(request: Message, owning_task_id: Option(Int))
 }
@@ -95,6 +96,7 @@ pub type ConversationLogMsg {
   UpdateTaskStatus(task_id: Int, status: TaskStatus, initiator: Initiator)
   // Internal (sent via .send())
   UserMessageReceived(text: String)
+  SystemMessageReceived(text: String, from: String)
   ResponseReceived(response: Message, owning_task_id: Option(Int))
   ToolResultsReceived(request: Message, owning_task_id: Option(Int))
   ConsumePicks
@@ -131,6 +133,15 @@ fn update(
     UserMessageReceived(text) -> {
       let item =
         UserMessageItem(text: text, owning_task_id: model.active_task_id)
+      #(ConversationLogModel(..model, log: [item, ..model.log]), CmdNone)
+    }
+    SystemMessageReceived(text, from) -> {
+      let item =
+        SystemMessageItem(
+          text: text,
+          from: from,
+          owning_task_id: model.active_task_id,
+        )
       #(ConversationLogModel(..model, log: [item, ..model.log]), CmdNone)
     }
     ResponseReceived(response, owning_task_id) -> {
@@ -861,6 +872,8 @@ fn yield_raw(group: List(LogItem)) -> List(Message) {
     case item {
       UserMessageItem(text, _) ->
         Ok(message.Request(parts: [message.UserPart(text)]))
+      SystemMessageItem(text, _, _) ->
+        Ok(message.Request(parts: [message.SystemPart(text)]))
       ResponseItem(response, _) -> Ok(response)
       ToolResultsItem(request, _) -> Ok(request)
     }
@@ -896,6 +909,7 @@ fn format_collapsed_block(task: Task, picked: Bool) -> String {
 fn log_item_task_id(item: LogItem) -> Option(Int) {
   case item {
     UserMessageItem(_, tid) -> tid
+    SystemMessageItem(_, _, tid) -> tid
     ResponseItem(_, tid) -> tid
     ToolResultsItem(_, tid) -> tid
   }
@@ -942,6 +956,12 @@ fn log_item_to_snapshot_event(item: LogItem) -> ServerEvent {
     UserMessageItem(text, owning_task_id) ->
       protocol.ConversationAppended(item: protocol.UserMessageSnapshot(
         text: text,
+        owning_task_id: owning_task_id,
+      ))
+    SystemMessageItem(text, from, owning_task_id) ->
+      protocol.ConversationAppended(item: protocol.SystemMessageSnapshot(
+        text: text,
+        from: from,
         owning_task_id: owning_task_id,
       ))
     ResponseItem(response, owning_task_id) ->

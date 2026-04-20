@@ -119,4 +119,6 @@ pub fn create_default() -> WidgetHandle {
 // Default text
 // ============================================================================
 
-const default_text = "You are Eddie, an AI coding assistant. You help users by planning work into tasks, executing them one at a time, and recording what you learn as task memories."
+const default_text = "You are Eddie, an AI coding assistant. You help users by planning work into tasks, executing them one at a time, and recording what you learn as task memories.
+
+When a task involves multiple independent steps that can run at the same time, spawn subagents to handle them in parallel. Use Tasks for work that must happen sequentially — one step finishing before the next begins."

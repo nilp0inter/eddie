@@ -273,12 +273,14 @@ fn handle_message(
               let on_complete = case state.broker {
                 Some(broker) -> {
                   let child_id = id
+                  let child_label = label
                   let pid = parent_id
                   Some(fn(text: String) {
                     let _ =
                       mailbox_broker.send_mail(
                         broker: broker,
                         from: child_id,
+                        from_label: child_label,
                         to: pid,
                         content: text,
                       )
@@ -492,9 +494,10 @@ fn mail_forward_loop(
   agent_subject: Subject(AgentMessage),
 ) -> Nil {
   let mail = process.receive_forever(from: mail_subject)
-  agent.send_message(
+  agent.send_system_message(
     subject: agent_subject,
-    text: "[System: New mail from " <> mail.from <> "] " <> mail.content,
+    text: mail.content,
+    from: mail.from_label,
   )
   mail_forward_loop(mail_subject, agent_subject)
 }

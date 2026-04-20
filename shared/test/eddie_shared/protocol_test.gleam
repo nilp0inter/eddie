@@ -509,6 +509,7 @@ pub fn mail_message_roundtrip_test() {
     mailbox.MailMessage(
       id: "msg-1",
       from: "parent-1",
+      from_label: "Parent",
       to: "child-1",
       content: "Please investigate the auth module",
       timestamp: 1_718_000_000_000,
@@ -526,6 +527,7 @@ pub fn mail_received_roundtrip_test() {
     protocol.MailReceived(message: mailbox.MailMessage(
       id: "msg-2",
       from: "child-1",
+      from_label: "Child",
       to: "parent-1",
       content: "Auth module uses JWT",
       timestamp: 1_718_000_001_000,
@@ -539,6 +541,7 @@ pub fn mail_sent_roundtrip_test() {
     protocol.MailSent(message: mailbox.MailMessage(
       id: "msg-3",
       from: "parent-1",
+      from_label: "Parent",
       to: "child-1",
       content: "Good work",
       timestamp: 1_718_000_002_000,
@@ -554,6 +557,7 @@ pub fn mailbox_updated_roundtrip_test() {
         mailbox.MailMessage(
           id: "msg-4",
           from: "child-1",
+          from_label: "Child",
           to: "parent-1",
           content: "Done",
           timestamp: 1_718_000_003_000,
@@ -564,6 +568,7 @@ pub fn mailbox_updated_roundtrip_test() {
         mailbox.MailMessage(
           id: "msg-5",
           from: "parent-1",
+          from_label: "Parent",
           to: "child-1",
           content: "Start",
           timestamp: 1_718_000_000_000,

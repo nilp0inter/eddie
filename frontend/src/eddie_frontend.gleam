@@ -1034,6 +1034,12 @@ fn view_log_item(item: LogItemSnapshot) -> Element(Msg) {
         html.div([attribute.class("msg-content")], [html.text(text)]),
       ])
 
+    protocol.SystemMessageSnapshot(text:, from:, ..) ->
+      html.div([attribute.class("msg msg-system")], [
+        html.div([attribute.class("msg-role")], [html.text(from)]),
+        html.div([attribute.class("msg-content")], [html.text(text)]),
+      ])
+
     protocol.ResponseSnapshot(response:, ..) -> {
       let text_parts =
         response.parts

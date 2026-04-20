@@ -88,6 +88,7 @@ pub type TurnResult {
 pub opaque type AgentMessage {
   // User-facing messages
   UserMessage(text: String, reply_to: Option(Subject(TurnResult)))
+  SystemMessage(text: String, from: String)
   GetState(reply_to: Subject(Context))
   GetCurrentState(reply_to: Subject(String))
   Subscribe(subscriber: Subject(String))
@@ -100,6 +101,12 @@ pub opaque type AgentMessage {
   ToolEffectCrashed(call_id: String, reason: String)
   // Init — agent learns its own subject
   SetSelf(subject: Subject(AgentMessage))
+}
+
+/// A queued message waiting to be processed.
+type PendingMessage {
+  PendingUser(text: String, reply_to: Option(Subject(TurnResult)))
+  PendingSystem(text: String, from: String)
 }
 
 /// Continuation for a pending tool effect.
@@ -126,7 +133,7 @@ type AgentState {
     self: Option(Subject(AgentMessage)),
     // Async bookkeeping
     llm_in_flight: Bool,
-    pending_user_messages: List(#(String, Option(Subject(TurnResult)))),
+    pending_messages: List(PendingMessage),
     pending_effects: Dict(String, EffectContinuation),
     collected_tool_parts: List(message.MessagePart),
     current_reply_to: Option(Subject(TurnResult)),
@@ -161,7 +168,7 @@ pub fn start_with_send_fn(
       send_fn: send_fn,
       self: None,
       llm_in_flight: False,
-      pending_user_messages: [],
+      pending_messages: [],
       pending_effects: dict.new(),
       collected_tool_parts: [],
       current_reply_to: None,
@@ -200,6 +207,15 @@ pub fn send_message(
   text text: String,
 ) -> Nil {
   process.send(subject, UserMessage(text: text, reply_to: None))
+}
+
+/// Send a system message (fire-and-forget, no reply).
+pub fn send_system_message(
+  subject subject: Subject(AgentMessage),
+  text text: String,
+  from from: String,
+) -> Nil {
+  process.send(subject, SystemMessage(text: text, from: from))
 }
 
 /// Get the current context state.
@@ -260,6 +276,9 @@ fn handle_message(
 
     UserMessage(text, reply_to) ->
       actor.continue(handle_user_message(state, text, reply_to))
+
+    SystemMessage(text, from) ->
+      actor.continue(handle_system_message(state, text, from))
 
     GetState(reply_to) -> {
       process.send(reply_to, state.context)
@@ -325,8 +344,8 @@ fn handle_user_message(
       // Queue the message for later
       AgentState(
         ..state,
-        pending_user_messages: list.append(state.pending_user_messages, [
-          #(text, reply_to),
+        pending_messages: list.append(state.pending_messages, [
+          PendingUser(text, reply_to),
         ]),
       )
     False -> {
@@ -338,6 +357,41 @@ fn handle_user_message(
           ..state,
           context: new_ctx,
           current_reply_to: reply_to,
+          iteration: 0,
+        )
+      notify_subscribers(state: state, old_context: old_ctx)
+      start_llm_call(state)
+    }
+  }
+}
+
+fn handle_system_message(
+  state state: AgentState,
+  text text: String,
+  from from: String,
+) -> AgentState {
+  let is_busy = state.llm_in_flight || !dict.is_empty(state.pending_effects)
+  case is_busy {
+    True ->
+      AgentState(
+        ..state,
+        pending_messages: list.append(state.pending_messages, [
+          PendingSystem(text, from),
+        ]),
+      )
+    False -> {
+      let old_ctx = state.context
+      let new_ctx =
+        context.add_system_message(
+          context: state.context,
+          text: text,
+          from: from,
+        )
+      let state =
+        AgentState(
+          ..state,
+          context: new_ctx,
+          current_reply_to: None,
           iteration: 0,
         )
       notify_subscribers(state: state, old_context: old_ctx)
@@ -719,12 +773,12 @@ fn complete_turn(state: AgentState, result: TurnResult) -> AgentState {
   drain_pending(state)
 }
 
-/// Process the next queued user message, if any.
+/// Process the next queued message, if any.
 fn drain_pending(state: AgentState) -> AgentState {
-  case state.pending_user_messages {
+  case state.pending_messages {
     [] -> state
-    [#(text, reply_to), ..rest] -> {
-      let state = AgentState(..state, pending_user_messages: rest)
+    [PendingUser(text, reply_to), ..rest] -> {
+      let state = AgentState(..state, pending_messages: rest)
       let old_ctx = state.context
       let new_ctx = context.add_user_message(context: state.context, text: text)
       let state =
@@ -732,6 +786,25 @@ fn drain_pending(state: AgentState) -> AgentState {
           ..state,
           context: new_ctx,
           current_reply_to: reply_to,
+          iteration: 0,
+        )
+      notify_subscribers(state: state, old_context: old_ctx)
+      start_llm_call(state)
+    }
+    [PendingSystem(text, from), ..rest] -> {
+      let state = AgentState(..state, pending_messages: rest)
+      let old_ctx = state.context
+      let new_ctx =
+        context.add_system_message(
+          context: state.context,
+          text: text,
+          from: from,
+        )
+      let state =
+        AgentState(
+          ..state,
+          context: new_ctx,
+          current_reply_to: None,
           iteration: 0,
         )
       notify_subscribers(state: state, old_context: old_ctx)

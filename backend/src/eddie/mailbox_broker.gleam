@@ -19,6 +19,7 @@ import gleam/otp/actor
 pub opaque type MailboxBrokerMessage {
   SendMail(
     from: String,
+    from_label: String,
     to: String,
     content: String,
     reply_to: Subject(Result(MailMessage, String)),
@@ -81,13 +82,14 @@ fn handle_message(
   msg: MailboxBrokerMessage,
 ) -> actor.Next(BrokerState, MailboxBrokerMessage) {
   case msg {
-    SendMail(from, to, content, reply_to) -> {
+    SendMail(from, from_label, to, content, reply_to) -> {
       let msg_id = "mail-" <> int.to_string(state.next_id)
       let timestamp = now_millis()
       let mail =
         MailMessage(
           id: msg_id,
           from: from,
+          from_label: from_label,
           to: to,
           content: content,
           timestamp: timestamp,
@@ -180,11 +182,12 @@ fn handle_message(
 pub fn send_mail(
   broker broker: Subject(MailboxBrokerMessage),
   from from: String,
+  from_label from_label: String,
   to to: String,
   content content: String,
 ) -> Result(MailMessage, String) {
   process.call(broker, waiting: 5000, sending: fn(reply_to) {
-    SendMail(from:, to:, content:, reply_to:)
+    SendMail(from:, from_label:, to:, content:, reply_to:)
   })
 }
 
