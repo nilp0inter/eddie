@@ -318,15 +318,21 @@ fn all_widget_state_entries(context: Context) -> List(StateEntry) {
       StateEntry(id: widget.id(child), events: widget.view_state(child))
     })
 
+  let task_entry =
+    StateEntry(
+      id: "conversation_log_tasks",
+      events: conversation_log.typed_view_task_state(log: context.log),
+    )
+
   let log_entry =
     StateEntry(
       id: "conversation_log",
-      events: conversation_log.typed_view_state(log: context.log),
+      events: conversation_log.typed_view_log_state(log: context.log),
     )
 
   [sp_entry]
   |> list.append(child_entries)
-  |> list.append([log_entry])
+  |> list.append([task_entry, log_entry])
 }
 
 /// Rebuild the tool_owners map by scanning all widgets' current tools.

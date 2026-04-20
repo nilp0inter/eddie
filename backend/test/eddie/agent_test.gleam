@@ -3,6 +3,7 @@ import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/httpc
 import gleam/list
+import gleam/option
 import gleam/otp/actor
 import gleam/string
 import gleeunit/should
@@ -55,6 +56,7 @@ fn test_config() -> agent.AgentConfig {
     ),
     system_prompt: "You are a test assistant.",
     extra_widgets: [],
+    on_turn_complete: option.None,
   )
 }
 

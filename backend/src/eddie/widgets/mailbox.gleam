@@ -59,7 +59,6 @@ pub type MailboxModel {
 
 pub type MailboxMsg {
   // LLM/UI tools
-  SendToParent(content: String, initiator: Initiator)
   SendToChild(child_id: String, content: String, initiator: Initiator)
   // Effect results
   SendResult(result: Result(MailMessage, String))
@@ -75,32 +74,6 @@ fn update(
   msg: MailboxMsg,
 ) -> #(MailboxModel, Cmd(MailboxMsg)) {
   case msg {
-    SendToParent(content, _initiator) -> {
-      case model.parent_id {
-        None -> #(model, cmd.CmdToolResult("Error: this agent has no parent"))
-        Some(pid) -> {
-          let broker = model.broker
-          let from = model.agent_id
-          #(
-            model,
-            cmd.CmdEffect(
-              perform: fn() {
-                coerce.unsafe_coerce(
-                  SendResult(result: mailbox_broker.send_mail(
-                    broker: broker,
-                    from: from,
-                    to: pid,
-                    content: content,
-                  )),
-                )
-              },
-              to_msg: coerce.unsafe_coerce,
-            ),
-          )
-        }
-      }
-    }
-
     SendToChild(child_id, content, _initiator) -> {
       // Query children from the tree at call time (via CmdEffect)
       // to validate the child_id against the live tree state
@@ -189,39 +162,7 @@ fn view_messages(model: MailboxModel) -> List(Message) {
   [message.Request(parts: [message.UserPart(text)])]
 }
 
-fn view_tools(model: MailboxModel) -> List(ToolDefinition) {
-  let parent_tools = case model.parent_id {
-    None -> []
-    Some(_) -> {
-      let assert Ok(t) =
-        tool.new(
-          name: "send_to_parent",
-          description: "Send a message to your parent agent.",
-          parameters_json: json.object([
-            #("type", json.string("object")),
-            #(
-              "properties",
-              json.object([
-                #(
-                  "message",
-                  json.object([
-                    #("type", json.string("string")),
-                    #(
-                      "description",
-                      json.string("The message content to send."),
-                    ),
-                  ]),
-                ),
-              ]),
-            ),
-            #("required", json.array(["message"], json.string)),
-            #("additionalProperties", json.bool(False)),
-          ]),
-        )
-      [t]
-    }
-  }
-
+fn view_tools(_model: MailboxModel) -> List(ToolDefinition) {
   let assert Ok(child_tool) =
     tool.new(
       name: "send_to_child",
@@ -255,7 +196,7 @@ fn view_tools(model: MailboxModel) -> List(ToolDefinition) {
       ]),
     )
 
-  list.flatten([parent_tools, [child_tool]])
+  [child_tool]
 }
 
 fn view_state(model: MailboxModel) -> List(ServerEvent) {
@@ -272,12 +213,6 @@ fn from_llm(
   args: Dynamic,
 ) -> Result(MailboxMsg, String) {
   case tool_name {
-    "send_to_parent" -> {
-      case decode.run(args, decode.at(["message"], decode.string)) {
-        Ok(content) -> Ok(SendToParent(content: content, initiator: LLM))
-        Error(_) -> Error("send_to_parent: missing 'message' field")
-      }
-    }
     "send_to_child" -> {
       let decoder = {
         use child_id <- decode.field("child_id", decode.string)
@@ -301,11 +236,6 @@ fn from_ui(
   args: Dynamic,
 ) -> Option(MailboxMsg) {
   case event_name {
-    "send_to_parent" ->
-      case decode.run(args, decode.at(["message"], decode.string)) {
-        Ok(content) -> Some(SendToParent(content: content, initiator: UI))
-        Error(_) -> None
-      }
     "send_to_child" -> {
       let decoder = {
         use child_id <- decode.field("child_id", decode.string)
@@ -333,7 +263,7 @@ pub fn create(
   list_children_fn list_children_fn: ListChildrenFn,
   broker broker: Subject(MailboxBrokerMessage),
 ) -> WidgetHandle {
-  let all_tools = ["send_to_parent", "send_to_child"]
+  let all_tools = ["send_to_child"]
   widget.create(widget.WidgetConfig(
     id: "mailbox",
     model: MailboxModel(

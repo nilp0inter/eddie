@@ -42,6 +42,9 @@ pub type AgentConfig {
     /// Extra widget handles injected by the caller (e.g. mailbox, subagent_manager).
     /// This avoids import cycles — agent.gleam doesn't need to know about specific widgets.
     extra_widgets: List(WidgetHandle),
+    /// Called with the assistant's text output after each successful turn.
+    /// Used by child agents to auto-send results to parent via mail.
+    on_turn_complete: Option(fn(String) -> Nil),
   )
 }
 
@@ -71,6 +74,7 @@ pub fn merge_config(
     ),
     system_prompt: option.unwrap(override.system_prompt, parent.system_prompt),
     extra_widgets: [],
+    on_turn_complete: None,
   )
 }
 
@@ -127,6 +131,7 @@ type AgentState {
     collected_tool_parts: List(message.MessagePart),
     current_reply_to: Option(Subject(TurnResult)),
     iteration: Int,
+    on_turn_complete: Option(fn(String) -> Nil),
   )
 }
 
@@ -161,6 +166,7 @@ pub fn start_with_send_fn(
       collected_tool_parts: [],
       current_reply_to: None,
       iteration: 0,
+      on_turn_complete: config.on_turn_complete,
     )
   let result =
     actor.new(initial_state)
@@ -692,6 +698,15 @@ fn complete_turn(state: AgentState, result: TurnResult) -> AgentState {
     TurnError(reason) -> shared_turn_result.TurnError(reason:)
   }
   broadcast_events(state, [protocol.TurnCompleted(result: shared_result)])
+
+  // Fire on_turn_complete callback (e.g. auto-mail to parent)
+  case result, state.on_turn_complete {
+    TurnSuccess(text), Some(cb) -> {
+      let _pid = process.spawn(fn() { cb(text) })
+      Nil
+    }
+    _, _ -> Nil
+  }
 
   // Reply to caller if present
   case state.current_reply_to {

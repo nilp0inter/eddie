@@ -76,7 +76,7 @@ fn update(
         <> label
         <> ". Your goal: "
         <> goal
-        <> "\n\nWork autonomously to achieve this goal. When done, send your results to your parent using the send_to_parent tool. Your parent will receive the message automatically and does not need to poll for it."
+        <> "\n\nWork autonomously to achieve this goal. Everything you write will be automatically sent to your parent agent."
       let info = SubagentInfo(id: child_id, label: label, goal: goal)
       let spawn_fn = model.spawn_fn
       #(

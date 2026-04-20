@@ -124,6 +124,7 @@ pub fn tree_integration_mail_delivery_test() {
       ),
       system_prompt: "test",
       extra_widgets: [],
+      on_turn_complete: option.None,
     )
   let send_fn = fn(_request: Request(String)) -> Result(
     Response(String),

@@ -1132,12 +1132,17 @@ fn view_thinking_indicator(state: AgentState) -> Element(Msg) {
 }
 
 fn view_input_bar(model: Model) -> Element(Msg) {
-  let disabled = model.agent_connection != Connected
+  let is_subagent = is_current_agent_subagent(model)
+  let disabled = model.agent_connection != Connected || is_subagent
+  let placeholder = case is_subagent {
+    True -> "This is a subagent, only its parent can send messages to it."
+    False -> "Send a message..."
+  }
   html.div([attribute.class("input-bar")], [
     html.input([
       attribute.class("chat-input"),
       attribute.value(model.chat_input),
-      attribute.placeholder("Send a message..."),
+      attribute.placeholder(placeholder),
       attribute.disabled(disabled),
       event.on_input(UpdateInput),
       on_enter_key(SubmitMessage),
@@ -1166,6 +1171,36 @@ fn on_enter_key(msg: Msg) -> Attribute(Msg) {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Check if the currently viewed agent is a subagent (has a parent).
+fn is_current_agent_subagent(model: Model) -> Bool {
+  case model.page {
+    AgentListPage -> False
+    AgentConversationPage(agent_id) ->
+      find_agent_info(model.agent_tree, agent_id)
+      |> option.map(fn(info) { option.is_some(info.parent_id) })
+      |> option.unwrap(False)
+  }
+}
+
+/// Search the agent tree forest for an AgentInfo by ID.
+fn find_agent_info(
+  nodes: List(AgentTreeNode),
+  target_id: String,
+) -> Option(AgentInfo) {
+  case nodes {
+    [] -> None
+    [node, ..rest] ->
+      case node.info.id == target_id {
+        True -> Some(node.info)
+        False ->
+          case find_agent_info(node.children, target_id) {
+            Some(info) -> Some(info)
+            None -> find_agent_info(rest, target_id)
+          }
+      }
+  }
+}
 
 fn remove_at(items: List(a), index: Int) -> List(a) {
   items

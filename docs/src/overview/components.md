@@ -6,7 +6,7 @@
 
 Reactive OTP actor that owns the agent state and manages the LLM turn loop. The agent never blocks — LLM calls and tool effects are spawned as async processes that send results back as actor messages. User messages arriving during a turn are queued and processed after the current turn completes.
 
-- **`AgentConfig(agent_id, llm_config, system_prompt, extra_widgets)`** — configuration passed at start. `agent_id` identifies the agent within the tree. `extra_widgets` is a list of pre-built `WidgetHandle`s injected by `AgentTree` (e.g. mailbox, subagent_manager) — this avoids import cycles between agent.gleam and the widget modules
+- **`AgentConfig(agent_id, llm_config, system_prompt, extra_widgets, on_turn_complete)`** — configuration passed at start. `agent_id` identifies the agent within the tree. `extra_widgets` is a list of pre-built `WidgetHandle`s injected by `AgentTree` (e.g. mailbox, subagent_manager) — this avoids import cycles between agent.gleam and the widget modules. `on_turn_complete` is an optional callback `fn(String) -> Nil` invoked after each successful turn — child agents use this to auto-send their text output as mail to the parent (see agent_tree below)
 - **`AgentConfigOverride(model, api_base, system_prompt)`** — partial overrides for child agents (all fields `Option`). API key is always inherited
 - **`merge_config(parent, child_id, override)`** — produces a child `AgentConfig` from a parent config, a child ID, and an override (None fields inherit from parent)
 - **`AgentMessage`** — opaque message type with eleven variants:
@@ -34,7 +34,7 @@ The agent reacts to messages based on its current data rather than following a s
 3. `LlmResponse` arrives — parse response, record token usage, add to context, notify subscribers
 4. If tool calls: dispatch each through `context.handle_tool_call` — completed tools are collected as `ToolReturnPart`s immediately; pending effects (`ToolEffectPending`) are spawned as async processes with resume continuations stored in `pending_effects`
 5. When all effects complete (`pending_effects` empty): record tool results in conversation log, increment iteration, call `start_llm_call` for the next round
-6. If text only: call `complete_turn` — broadcast `TurnCompleted`, reply to caller, drain next queued user message
+6. If text only: call `complete_turn` — broadcast `TurnCompleted`, fire the `on_turn_complete` callback (if set) in a spawned process, reply to caller, drain next queued user message
 
 **Agent state bookkeeping:**
 
@@ -51,7 +51,7 @@ The agent reacts to messages based on its current data rather than following a s
 
 After each state mutation (user message added, response recorded, tool calls dispatched, tool results recorded), the agent computes `context.changed_state(old, new)` and sends the resulting `ServerEvent` list as a JSON-encoded string to all subscriber Subjects. This is a fire-and-forget push — subscribers are WebSocket handler processes that forward the JSON to the browser.
 
-`changed_state` uses delta detection: for each widget, it compares the old and new `view_state` output using structural equality. If a widget's state changed and the old events are a prefix of the new events (append-only widgets like the conversation log), only the newly appended tail is returned — avoiding re-sending the full conversation history on every mutation. For replacement-style widgets (like the goal or system prompt), the full new events are returned when they differ.
+`changed_state` uses delta detection: for each widget, it compares the old and new `view_state` output using structural equality. If a widget's state changed and the old events are a prefix of the new events (append-only widgets like the conversation log), only the newly appended tail is returned — avoiding re-sending the full conversation history on every mutation. For replacement-style widgets (like the goal or system prompt), the full new events are returned when they differ. The conversation log's task events and log events are split into two separate state entries (`conversation_log_tasks` and `conversation_log`) so that task state changes (replacement semantics) don't break the prefix detection on the append-only conversation log.
 
 The agent captures the pre-dispatch context before the tool call fold and notifies subscribers after all synchronous tool dispatches complete — this ensures widget state changes (e.g. `GoalUpdated`, `TaskCreated`) are broadcast immediately rather than being lost in the diff. `ToolCallStarted` and `ToolCallCompleted` events are sent individually during dispatch. `TurnStarted` and `TurnCompleted` are also broadcast through the subscriber mechanism. All notifications use the same JSON-encoded `ServerEvent` list format defined in `eddie_shared/protocol`.
 
@@ -129,7 +129,7 @@ Two-page Lustre application (`frontend/src/eddie_frontend.gleam`) with a landing
 - **Top bar:** back button, "Eddie" title, agent ID, connection status
 - **Sidebar panels:** Goal, Tasks, Files, Tokens, Subagents (child agents with status icons), Mailbox (outbox)
 - **Chat view:** user messages, assistant responses with tool call badges, collapsible tool results, thinking indicator
-- **Input bar:** text input and send button, disabled when agent WS is not connected
+- **Input bar:** text input and send button, disabled when agent WS is not connected or when viewing a subagent (placeholder reads "This is a subagent, only its parent can send messages to it.")
 
 - **JS FFI:** `setTimeout`, `scrollToBottom`
 - **Theme:** Catppuccin Mocha dark theme via CSS in the HTML shell
@@ -163,7 +163,7 @@ OTP actor that manages a forest of rose-tree agent hierarchies. Each agent in th
 - **`set_broker(tree, broker)`** — injects the mailbox broker Subject (called once at startup)
 - **`SpawnError`** — `AgentAlreadyExists(id)` | `ParentNotFound(id)` | `AgentStartFailed(StartError)`
 
-Agents are stored as `Dict(String, AgentEntry)` where `AgentEntry` holds `subject`, `label`, `parent_id`, `child_ids`, and `status`. The tree builds extra widgets (subagent_manager, mailbox) via closures at spawn time to avoid import cycles (see [trade-off card](../decisions/tradeoffs/14-closure-based-widget-injection.md)). After spawning each agent, the tree also starts a mail forwarder process that subscribes to the broker and converts incoming mail into user messages (see Mail forwarder section under widgets). The tree does not use OTP supervision — each agent is a standalone actor. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
+Agents are stored as `Dict(String, AgentEntry)` where `AgentEntry` holds `subject`, `label`, `parent_id`, `child_ids`, and `status`. The tree builds extra widgets (subagent_manager, mailbox) via closures at spawn time to avoid import cycles (see [trade-off card](../decisions/tradeoffs/14-closure-based-widget-injection.md)). For child agents, the tree also wires the `on_turn_complete` callback to call `mailbox_broker.send_mail` from the child to the parent — this means every text output from a subagent is automatically delivered as mail to its parent without the LLM needing to call a tool. After spawning each agent, the tree starts a mail forwarder process that subscribes to the broker and converts incoming mail into user messages (see Mail forwarder section under widgets). The tree does not use OTP supervision — each agent is a standalone actor. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
 
 ### `eddie/mailbox_broker`
 
@@ -253,7 +253,7 @@ Log items are walked in chronological order, grouped by consecutive `owning_task
 
 An "Open tasks" block listing pending and in-progress tasks is appended at the end.
 
-**`view_state`** produces the full state for each task — `TaskCreated` followed by `TaskStatusChanged` (if not Pending) and `TaskMemoryAdded` events (one per memory) — plus `ConversationAppended` events for each log item (as `LogItemSnapshot` variants: `UserMessageSnapshot`, `ResponseSnapshot`, `ToolResultsSnapshot`). This ensures `changed_state` detects task status and memory changes, and that initial state snapshots carry the complete task state. The frontend handles `TaskCreated` as an upsert (reset if exists, create if new) to support full state re-sends from the diff mechanism.
+**`view_state`** produces the full state for each task — `TaskCreated` followed by `TaskStatusChanged` (if not Pending) and `TaskMemoryAdded` events (one per memory) — plus `ConversationAppended` events for each log item (as `LogItemSnapshot` variants: `UserMessageSnapshot`, `ResponseSnapshot`, `ToolResultsSnapshot`). Task events and log events are exposed as separate functions (`typed_view_task_state` and `typed_view_log_state`) so the Context can split them into independent state entries — this prevents task state changes from breaking the prefix detection on the append-only conversation log in `changed_state`. The frontend handles `TaskCreated` as an upsert (reset if exists, create if new) to support full state re-sends from the diff mechanism.
 
 **Factory:** `create()` — returns a `WidgetHandle` with an empty model. For Context's use, `init()` returns a typed `ConversationLog` opaque type with direct dispatch, protocol checking, and owning task ID access (see [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md)).
 
@@ -303,17 +303,15 @@ Gives agents the ability to spawn child agents autonomously. Protocol-free. Uses
 - **Views:** `view_messages` shows a summary of spawned subagents, plus a critical instruction when subagents exist telling the agent it must end its turn to receive replies; `view_state` produces `SubagentsUpdated(children)` with `AgentInfo` records
 - **Factory:** `create(agent_id, spawn_fn, list_children_fn)` — closures are constructed by `agent_tree.build_extra_widgets`
 
-The system prompt for spawned children includes the goal and instructs them to use `send_to_parent` when done. The spawn result and tool description both emphasise that the parent must end its turn after spawning — incoming mail is only delivered between turns (see mailbox widget and mail forwarder below).
+The system prompt for spawned children includes the goal and informs them that everything they write will be automatically sent to the parent agent. The spawn result and tool description both emphasise that the parent must end its turn after spawning — incoming mail is only delivered between turns (see mailbox widget and mail forwarder below).
 
 ### `eddie/widgets/mailbox`
 
-Parent-child communication via free-form messages through the central mailbox broker. Protocol-free. Send-only — incoming mail is delivered automatically by the mail forwarder (see below).
+Parent-child communication via free-form messages through the central mailbox broker. Protocol-free. Child-to-parent messages are sent automatically (see `on_turn_complete` above); the mailbox widget provides only parent-to-child sending. Incoming mail is delivered automatically by the mail forwarder (see below).
 
 - **Model:** `MailboxModel(agent_id, parent_id, list_children_fn, inbox, outbox, broker)` — `broker` is a `Subject(MailboxBrokerMessage)`, `list_children_fn` queries the tree at call time for live child validation
-- **Messages:** `SendToParent(content, initiator)`, `SendToChild(child_id, content, initiator)`, `SendResult(result)`, `ChildrenQueried(children, child_id, content)`
-- **LLM tools (conditional):**
-  - Has parent: `send_to_parent(message)`
-  - Always: `send_to_child(child_id, message)`
+- **Messages:** `SendToChild(child_id, content, initiator)`, `SendResult(result)`, `ChildrenQueried(children, child_id, content)`
+- **LLM tools:** `send_to_child(child_id, message)` — always available
 - **Views:** `view_messages` shows mailbox summary (parent info); `view_state` produces `MailboxUpdated(inbox, outbox)`
 - **Factory:** `create(agent_id, parent_id, list_children_fn, broker)`
 
@@ -372,7 +370,7 @@ The root compositor — the glue between widgets and the agent loop. Holds a sys
 - **`replace_widget(context, owner_id, handle)`** — replaces a widget handle by owner ID. Used by the agent to insert updated handles after async effects complete
 - **`handle_widget_event`** — dispatches browser UI events to all widgets (no protocol enforcement)
 - **`current_state(context)`** — returns the current state events for all widgets as a flat `List(ServerEvent)` (used for initial WebSocket connect)
-- **`changed_state(old, new)`** — compares each widget's `view_state` output using structural equality. For append-only widgets (where old events are a prefix of new events), returns only the newly appended tail. For replacement-style widgets, returns the full new events when they differ
+- **`changed_state(old, new)`** — compares each widget's `view_state` output using structural equality. For append-only widgets (where old events are a prefix of new events), returns only the newly appended tail. For replacement-style widgets, returns the full new events when they differ. The conversation log is split into two entries (tasks and log) so each can use the appropriate diffing strategy independently
 
 The conversation log is stored as a typed `ConversationLog` (not a `WidgetHandle`) so Context can access protocol checking and the owning task ID directly. See [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md) for the rationale.
 

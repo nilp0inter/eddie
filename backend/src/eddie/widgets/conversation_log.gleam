@@ -1235,6 +1235,23 @@ pub fn typed_view_state(log log: ConversationLog) -> List(ServerEvent) {
   view_state(log.model)
 }
 
+/// Task events only (replacement semantics — safe to re-send in full).
+pub fn typed_view_task_state(log log: ConversationLog) -> List(ServerEvent) {
+  let task_ids = list.reverse(log.model.task_order)
+  list.flat_map(task_ids, fn(tid) {
+    case dict.get(log.model.tasks, tid) {
+      Ok(task) -> task_to_snapshot_events(task)
+      Error(_) -> []
+    }
+  })
+}
+
+/// Log events only (append-only — prefix detection works correctly).
+pub fn typed_view_log_state(log log: ConversationLog) -> List(ServerEvent) {
+  list.reverse(log.model.log)
+  |> list.map(log_item_to_snapshot_event)
+}
+
 /// Execute the Cmd loop for the typed log (mirrors widget.execute_cmd_loop).
 fn execute_log_cmd_loop(
   model model: ConversationLogModel,

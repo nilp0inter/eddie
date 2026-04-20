@@ -270,6 +270,23 @@ fn handle_message(
                   tree_self: state.self,
                   broker: state.broker,
                 )
+              let on_complete = case state.broker {
+                Some(broker) -> {
+                  let child_id = id
+                  let pid = parent_id
+                  Some(fn(text: String) {
+                    let _ =
+                      mailbox_broker.send_mail(
+                        broker: broker,
+                        from: child_id,
+                        to: pid,
+                        content: text,
+                      )
+                    Nil
+                  })
+                }
+                None -> None
+              }
               let child_config =
                 AgentConfig(
                   ..agent.merge_config(
@@ -278,6 +295,7 @@ fn handle_message(
                     override: override,
                   ),
                   extra_widgets: extra,
+                  on_turn_complete: on_complete,
                 )
               case
                 agent.start_with_send_fn(

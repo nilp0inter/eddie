@@ -1,5 +1,6 @@
 import gleam/erlang/process
 import gleam/int
+import gleam/option
 import gleam/result
 
 import eddie/agent
@@ -37,6 +38,7 @@ pub fn main() -> Nil {
       ),
       system_prompt: default_system_prompt(),
       extra_widgets: [],
+      on_turn_complete: option.None,
     )
 
   let assert Ok(tree) = agent_tree.start(config: base_config)

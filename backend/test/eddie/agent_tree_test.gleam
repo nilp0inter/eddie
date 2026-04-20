@@ -24,6 +24,7 @@ fn test_config() -> agent.AgentConfig {
     ),
     system_prompt: "You are a test assistant.",
     extra_widgets: [],
+    on_turn_complete: option.None,
   )
 }
 
