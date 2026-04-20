@@ -128,6 +128,8 @@ pub type ClientCommand {
   CloseReadFile(path: String)
   /// Spawn a new root agent (server generates UUID + default label).
   SpawnRootAgent
+  /// Rename an agent.
+  RenameAgent(agent_id: String, label: String)
 }
 
 // ============================================================================
@@ -506,6 +508,12 @@ pub fn client_command_to_json(command: ClientCommand) -> json.Json {
         #("path", json.string(path)),
       ])
     SpawnRootAgent -> json.object([#("type", json.string("spawn_root_agent"))])
+    RenameAgent(agent_id, label) ->
+      json.object([
+        #("type", json.string("rename_agent")),
+        #("agent_id", json.string(agent_id)),
+        #("label", json.string(label)),
+      ])
   }
 }
 
@@ -816,6 +824,11 @@ pub fn client_command_decoder() -> decode.Decoder(ClientCommand) {
       decode.success(CloseReadFile(path:))
     }
     "spawn_root_agent" -> decode.success(SpawnRootAgent)
+    "rename_agent" -> {
+      use agent_id <- decode.field("agent_id", decode.string)
+      use label <- decode.field("label", decode.string)
+      decode.success(RenameAgent(agent_id:, label:))
+    }
     _ -> decode.failure(ClearGoal, "ClientCommand")
   }
 }

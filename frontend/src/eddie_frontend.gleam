@@ -21,6 +21,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/set
 import gleam/string
 import gleam/uri
 import lustre
@@ -118,6 +119,10 @@ type Model {
     agents: Dict(String, AgentState),
     chat_input: String,
     active_panel: Option(Panel),
+    /// When True, navigate to the next newly-appeared root agent
+    awaiting_new_agent: Bool,
+    /// Inline label editing state
+    editing_label: Option(String),
   )
 }
 
@@ -134,6 +139,8 @@ fn empty_model() -> Model {
     agents: dict.new(),
     chat_input: "",
     active_panel: None,
+    awaiting_new_agent: False,
+    editing_label: None,
   )
 }
 
@@ -182,6 +189,11 @@ type Msg {
   SubmitMessage
   // Sidebar
   SetActivePanel(Option(Panel))
+  // Agent renaming
+  StartEditingLabel
+  UpdateEditLabel(String)
+  SubmitEditLabel
+  CancelEditLabel
 }
 
 // ============================================================================
@@ -293,8 +305,7 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
     ControlWsEvent(ws.OnTextMessage(text)) -> {
       let events = parse_server_events(text)
-      let new_model = apply_control_events(model, events)
-      #(new_model, effect.none())
+      apply_control_events(model, events)
     }
 
     ControlWsEvent(ws.OnBinaryMessage(_)) -> #(model, effect.none())
@@ -447,7 +458,10 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         None -> #(model, effect.none())
         Some(socket) -> {
           let command = protocol.SpawnRootAgent
-          #(model, send_command(socket, command))
+          #(
+            Model(..model, awaiting_new_agent: True),
+            send_command(socket, command),
+          )
         }
       }
     }
@@ -466,6 +480,38 @@ fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         }
       }
     }
+
+    // -- Agent renaming ------------------------------------------------------
+    StartEditingLabel -> {
+      let label = current_agent_label(model)
+      #(Model(..model, editing_label: Some(label)), effect.none())
+    }
+
+    UpdateEditLabel(text) -> #(
+      Model(..model, editing_label: Some(text)),
+      effect.none(),
+    )
+
+    SubmitEditLabel -> {
+      case model.editing_label, model.page, model.control_ws {
+        Some(new_label), AgentConversationPage(agent_id), Some(socket) -> {
+          let trimmed = string.trim(new_label)
+          case trimmed {
+            "" -> #(Model(..model, editing_label: None), effect.none())
+            _ -> {
+              let command = protocol.RenameAgent(agent_id:, label: trimmed)
+              #(
+                Model(..model, editing_label: None),
+                send_command(socket, command),
+              )
+            }
+          }
+        }
+        _, _, _ -> #(Model(..model, editing_label: None), effect.none())
+      }
+    }
+
+    CancelEditLabel -> #(Model(..model, editing_label: None), effect.none())
 
     // -- Sidebar ------------------------------------------------------------
     SetActivePanel(panel) -> {
@@ -490,13 +536,35 @@ fn parse_server_events(text: String) -> List(ServerEvent) {
 }
 
 /// Apply control-level events (tree changes).
-fn apply_control_events(model: Model, events: List(ServerEvent)) -> Model {
-  list.fold(events, model, fn(m, event) {
-    case event {
-      protocol.AgentTreeChanged(roots:) -> Model(..m, agent_tree: roots)
-      _ -> m
+fn apply_control_events(
+  model: Model,
+  events: List(ServerEvent),
+) -> #(Model, Effect(Msg)) {
+  let old_root_ids =
+    list.map(model.agent_tree, fn(node) { node.info.id }) |> set.from_list
+  let new_model =
+    list.fold(events, model, fn(m, event) {
+      case event {
+        protocol.AgentTreeChanged(roots:) -> Model(..m, agent_tree: roots)
+        _ -> m
+      }
+    })
+  case new_model.awaiting_new_agent {
+    True -> {
+      let new_root =
+        list.find(new_model.agent_tree, fn(node) {
+          !set.contains(old_root_ids, node.info.id)
+        })
+      case new_root {
+        Ok(node) -> {
+          let m = Model(..new_model, awaiting_new_agent: False)
+          navigate_to_page(m, AgentConversationPage(node.info.id), True)
+        }
+        Error(_) -> #(new_model, effect.none())
+      }
     }
-  })
+    False -> #(new_model, effect.none())
+  }
 }
 
 /// Apply per-agent events to agent state.
@@ -810,6 +878,7 @@ fn view_conversation_top_bar(model: Model) -> Element(Msg) {
     AgentConversationPage(id) -> id
     AgentListPage -> ""
   }
+  let is_subagent = is_current_agent_subagent(model)
   let status_class = case model.agent_connection {
     Connected -> "status-connected"
     Connecting -> "status-connecting"
@@ -820,11 +889,61 @@ fn view_conversation_top_bar(model: Model) -> Element(Msg) {
     Connecting -> "Connecting..."
     Disconnected -> "Disconnected"
   }
+  let label_element = case model.editing_label, is_subagent {
+    Some(edit_text), False ->
+      html.div([attribute.class("label-edit")], [
+        html.input([
+          attribute.class("label-edit-input"),
+          attribute.value(edit_text),
+          event.on_input(UpdateEditLabel),
+          on_label_edit_key(),
+        ]),
+        html.button(
+          [attribute.class("label-edit-ok"), event.on_click(SubmitEditLabel)],
+          [html.text("OK")],
+        ),
+        html.button(
+          [
+            attribute.class("label-edit-cancel"),
+            event.on_click(CancelEditLabel),
+          ],
+          [html.text("Cancel")],
+        ),
+      ])
+    _, False ->
+      html.h1(
+        [
+          attribute.class("editable-label"),
+          event.on_click(StartEditingLabel),
+          attribute.title("Click to rename"),
+        ],
+        [html.text(current_agent_label(model))],
+      )
+    _, True -> html.h1([], [html.text(current_agent_label(model))])
+  }
+  let parent_button = case is_subagent {
+    True -> {
+      let parent_id = current_agent_parent_id(model)
+      case parent_id {
+        Some(pid) ->
+          html.button(
+            [
+              attribute.class("parent-btn"),
+              event.on_click(NavigateToAgent(pid)),
+            ],
+            [html.text("^ Parent")],
+          )
+        None -> html.text("")
+      }
+    }
+    False -> html.text("")
+  }
   html.header([attribute.class("top-bar")], [
     html.button([attribute.class("back-btn"), event.on_click(NavigateToList)], [
       html.text("< Back"),
     ]),
-    html.h1([], [html.text(current_agent_label(model))]),
+    parent_button,
+    label_element,
     html.span([attribute.class("agent-id-label")], [html.text(agent_id)]),
     html.span([attribute.class("status " <> status_class)], [
       html.text(status_text),
@@ -980,14 +1099,20 @@ fn view_subagents_panel(state: AgentState) -> Element(Msg) {
         html.ul(
           [attribute.class("task-list")],
           list.map(agents, fn(a) {
-            html.li([attribute.class("task-item")], [
-              html.span([attribute.class("task-icon")], [
-                html.text(status_icon_for_agent(a.status)),
-              ]),
-              html.span([attribute.class("task-desc")], [
-                html.text(a.label <> " (" <> a.id <> ")"),
-              ]),
-            ])
+            html.li(
+              [
+                attribute.class("task-item clickable"),
+                event.on_click(NavigateToAgent(a.id)),
+              ],
+              [
+                html.span([attribute.class("task-icon")], [
+                  html.text(status_icon_for_agent(a.status)),
+                ]),
+                html.span([attribute.class("task-desc")], [
+                  html.text(a.label <> " (" <> a.id <> ")"),
+                ]),
+              ],
+            )
           }),
         )
     },
@@ -1217,6 +1342,17 @@ fn on_enter_key(msg: Msg) -> Attribute(Msg) {
   })
 }
 
+fn on_label_edit_key() -> Attribute(Msg) {
+  event.on("keydown", {
+    use key <- decode.field("key", decode.string)
+    case key {
+      "Enter" -> decode.success(SubmitEditLabel)
+      "Escape" -> decode.success(CancelEditLabel)
+      _ -> decode.failure(SubmitEditLabel, "Enter or Escape")
+    }
+  })
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -1229,6 +1365,15 @@ fn current_agent_label(model: Model) -> String {
       find_agent_info(model.agent_tree, agent_id)
       |> option.map(fn(info) { info.label })
       |> option.unwrap("Eddie")
+  }
+}
+
+fn current_agent_parent_id(model: Model) -> Option(String) {
+  case model.page {
+    AgentListPage -> None
+    AgentConversationPage(agent_id) ->
+      find_agent_info(model.agent_tree, agent_id)
+      |> option.then(fn(info) { info.parent_id })
   }
 }
 

@@ -76,6 +76,7 @@ pub opaque type AgentTreeMessage {
     reply_to: Subject(Result(Nil, SpawnError)),
   )
   UpdateStatus(agent_id: String, status: AgentStatus)
+  RenameAgent(agent_id: String, label: String)
   SubscribeTree(subscriber: Subject(String))
   UnsubscribeTree(subscriber: Subject(String))
   SetSelf(subject: Subject(AgentTreeMessage))
@@ -367,6 +368,19 @@ fn handle_message(
       }
     }
 
+    RenameAgent(agent_id, label) -> {
+      case dict.get(state.agents, agent_id) {
+        Error(_) -> actor.continue(state)
+        Ok(entry) -> {
+          let updated = AgentEntry(..entry, label: label)
+          let new_agents = dict.insert(state.agents, agent_id, updated)
+          let new_state = TreeState(..state, agents: new_agents)
+          broadcast_tree_changed(new_state)
+          actor.continue(new_state)
+        }
+      }
+    }
+
     SubscribeTree(subscriber) -> {
       actor.continue(
         TreeState(..state, subscribers: [subscriber, ..state.subscribers]),
@@ -626,6 +640,15 @@ pub fn spawn_child(
       reply_to:,
     )
   })
+}
+
+/// Rename an agent.
+pub fn rename_agent(
+  tree tree: Subject(AgentTreeMessage),
+  agent_id agent_id: String,
+  label label: String,
+) -> Nil {
+  process.send(tree, RenameAgent(agent_id:, label:))
 }
 
 /// Update an agent's status.

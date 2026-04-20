@@ -79,7 +79,7 @@ Mist HTTP and WebSocket server. The server is thin glue between the Lustre SPA f
 
 **Control WebSocket (`/ws/control`):**
 
-System-level channel, always connected from the frontend's landing page. On init, subscribes to tree change events via `agent_tree.subscribe_tree` and sends the initial `AgentTreeChanged` event. Handles `SpawnRootAgent` commands — generates a UUID server-side, creates the agent with a default label and system prompt via `agent_tree.spawn_root`. The tree broadcasts `AgentTreeChanged` to all control WS subscribers after spawning.
+System-level channel, always connected from the frontend's landing page. On init, subscribes to tree change events via `agent_tree.subscribe_tree` and sends the initial `AgentTreeChanged` event. Handles `SpawnRootAgent` commands — generates a UUID server-side, creates the agent with a default label and system prompt via `agent_tree.spawn_root`. Also handles `RenameAgent(agent_id, label)` commands — delegates to `agent_tree.rename_agent` which updates the label and broadcasts `AgentTreeChanged`. The tree broadcasts `AgentTreeChanged` to all control WS subscribers after spawning or renaming.
 
 **Agent WebSocket (`/ws/<agent_id>`):**
 
@@ -109,8 +109,8 @@ Two-page Lustre application (`frontend/src/eddie_frontend.gleam`) with a landing
 
 **Page navigation:**
 
-- `AgentListPage` (`/`) — landing page showing the rose-tree forest of agents. A "+" button sends `SpawnRootAgent` via the control WebSocket. Clicking an agent card navigates to its conversation
-- `AgentConversationPage(agent_id)` (`/agent/<agent_id>`) — chat UI with sidebar panels. A back button returns to the agent list
+- `AgentListPage` (`/`) — landing page showing the rose-tree forest of agents. A "+" button sends `SpawnRootAgent` via the control WebSocket and automatically navigates to the newly created agent. Clicking an agent card navigates to its conversation
+- `AgentConversationPage(agent_id)` (`/agent/<agent_id>`) — chat UI with sidebar panels. A back button returns to the agent list. For subagents, a "^ Parent" button navigates to the parent agent
 
 URL-based routing uses the `modem` library. The URL reflects the current page — navigating to an agent pushes `/agent/<id>` to the browser history, and navigating back pushes `/`. On page load, `modem.initial_uri()` reads the current URL to restore the correct page (including the agent WebSocket connection). Browser back/forward buttons trigger `UrlChanged` messages via `modem.init`, which navigate without pushing duplicate history entries. The backend serves the SPA HTML for all unmatched paths, enabling deep links and F5 refresh.
 
@@ -130,8 +130,8 @@ URL-based routing uses the `modem` library. The URL reflects the current page �
 
 **Conversation page view:**
 
-- **Top bar:** back button, agent label (looked up from the tree, defaults to "Eddie" for root agents), agent ID, connection status
-- **Sidebar panels:** Goal, Tasks, Files, Tokens, Subagents (child agents with status icons), Mailbox (outbox)
+- **Top bar:** back button, parent navigation button (subagents only), agent label (clicked to rename for root agents — sends `RenameAgent` via control WebSocket), agent ID, connection status
+- **Sidebar panels:** Goal, Tasks, Files, Tokens, Subagents (child agents with status icons, clickable to navigate to their conversation page), Mailbox (outbox)
 - **Chat view:** user messages (right-aligned), system messages from subagents (right-aligned, showing the sender's label), assistant responses with tool call badges (using the current agent's label), collapsible tool results, thinking indicator
 - **Input bar:** text input and send button, disabled when agent WS is not connected or when viewing a subagent (placeholder reads "This is a subagent, only its parent can send messages to it.")
 
@@ -154,7 +154,7 @@ Application entry point. Reads configuration from environment variables, creates
 
 OTP actor that manages a forest of rose-tree agent hierarchies. Each agent in the tree is an independent OTP actor with its own context and turn loop. The tree starts empty — no agents exist until explicitly spawned.
 
-- **`AgentTreeMessage`** — opaque message type with variants: `GetAgent(id)`, `GetAgentTree`, `GetChildren(parent_id)`, `GetParent(child_id)`, `SpawnRootAgent(id, label, system_prompt)`, `SpawnChildAgent(id, label, parent_id, goal, initial_message, override)`, `UpdateStatus(agent_id, status)`, `SubscribeTree(subscriber)`, `UnsubscribeTree(subscriber)`, `SetSelf(subject)`, `SetBroker(broker)`
+- **`AgentTreeMessage`** — opaque message type with variants: `GetAgent(id)`, `GetAgentTree`, `GetChildren(parent_id)`, `GetParent(child_id)`, `SpawnRootAgent(id, label, system_prompt)`, `SpawnChildAgent(id, label, parent_id, goal, initial_message, override)`, `UpdateStatus(agent_id, status)`, `RenameAgent(agent_id, label)`, `SubscribeTree(subscriber)`, `UnsubscribeTree(subscriber)`, `SetSelf(subject)`, `SetBroker(broker)`
 - **`start(config)` / `start_with_send_fn(config, send_fn)`** — creates an empty tree, sends `SetSelf` so the tree knows its own Subject, returns `Result(Subject(AgentTreeMessage), StartError)`
 - **`get_agent(tree, id)`** — flat lookup by ID, returns `Result(Subject(AgentMessage), Nil)`
 - **`get_tree(tree)`** — returns `List(AgentTreeNode)` (the rose-tree forest, assembled from the flat Dict on demand)
@@ -162,6 +162,7 @@ OTP actor that manages a forest of rose-tree agent hierarchies. Each agent in th
 - **`get_parent(tree, child_id)`** — returns `Option(String)` parent ID
 - **`spawn_root(tree, id, label, system_prompt)`** — creates a top-level agent with default config plus injected extra widgets (subagent_manager, mailbox)
 - **`spawn_child(tree, id, label, parent_id, goal, initial_message, override)`** — creates a child agent, updates parent's `child_ids`, sends the initial user message to start the child's turn
+- **`rename_agent(tree, agent_id, label)`** — updates an agent's label and broadcasts `AgentTreeChanged`
 - **`update_status(tree, agent_id, status)`** — updates an agent's status and broadcasts `AgentTreeChanged`
 - **`subscribe_tree` / `unsubscribe_tree`** — subscribe to tree change broadcasts (for control WebSocket)
 - **`set_broker(tree, broker)`** — injects the mailbox broker Subject (called once at startup)

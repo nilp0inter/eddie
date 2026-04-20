@@ -131,6 +131,8 @@ fn index_html() -> String {
     .muted { color: #6c7086; font-size: 12px; }
     .task-list { list-style: none; }
     .task-item { padding: 4px 0; font-size: 12px; display: flex; gap: 6px; align-items: flex-start; }
+    .task-item.clickable { cursor: pointer; border-radius: 4px; padding: 4px; }
+    .task-item.clickable:hover { background: #313244; }
     .task-icon { color: #f9e2af; flex-shrink: 0; }
     .task-item.done .task-desc { color: #6c7086; text-decoration: line-through; }
     .task-memories { list-style: disc; margin: 2px 0 2px 20px; font-size: 11px; color: #6c7086; }
@@ -170,6 +172,14 @@ fn index_html() -> String {
     .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .back-btn { background: none; border: none; color: #89b4fa; cursor: pointer; font-family: inherit; font-size: 13px; padding: 4px 8px; border-radius: 4px; }
     .back-btn:hover { background: #313244; }
+    .parent-btn { background: none; border: none; color: #94e2d5; cursor: pointer; font-family: inherit; font-size: 13px; padding: 4px 8px; border-radius: 4px; }
+    .parent-btn:hover { background: #313244; }
+    .editable-label { cursor: pointer; border-bottom: 1px dashed transparent; }
+    .editable-label:hover { border-bottom-color: #6c7086; }
+    .label-edit { display: flex; align-items: center; gap: 6px; }
+    .label-edit-input { padding: 2px 8px; background: #313244; color: #cdd6f4; border: 1px solid #cba6f7; border-radius: 4px; font-family: inherit; font-size: 16px; font-weight: bold; outline: none; width: 200px; }
+    .label-edit-ok { font-size: 11px; padding: 3px 8px; background: #a6e3a1; color: #1e1e2e; border: none; border-radius: 4px; cursor: pointer; font-family: inherit; font-weight: 600; }
+    .label-edit-cancel { font-size: 11px; padding: 3px 8px; background: none; color: #6c7086; border: 1px solid #45475a; border-radius: 4px; cursor: pointer; font-family: inherit; }
     .agent-id-label { font-size: 11px; color: #6c7086; margin-left: 8px; flex: 1; }
     .agent-list-page { flex: 1; padding: 24px; overflow-y: auto; }
     .agent-list-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
@@ -287,6 +297,9 @@ fn handle_control_client_message(
   conn conn: mist.WebsocketConnection,
 ) -> Nil {
   case json.parse(text, protocol.client_command_decoder()) {
+    Ok(protocol.RenameAgent(agent_id:, label:)) -> {
+      agent_tree.rename_agent(tree: state.tree, agent_id:, label:)
+    }
     Ok(protocol.SpawnRootAgent) -> {
       let id = generate_uuid()
       let label = "Agent"
@@ -515,8 +528,10 @@ fn dispatch_agent_command(
         "close_read_file",
         "{\"path\": " <> json.to_string(json.string(path)) <> "}",
       ))
-    // SpawnRootAgent is handled by control WS, SendUserMessage handled above
-    protocol.SendUserMessage(..) | protocol.SpawnRootAgent -> Error(Nil)
+    // SpawnRootAgent/RenameAgent handled by control WS, SendUserMessage above
+    protocol.SendUserMessage(..)
+    | protocol.SpawnRootAgent
+    | protocol.RenameAgent(..) -> Error(Nil)
   }
   case result {
     Ok(#(event_name, args_json)) -> {
