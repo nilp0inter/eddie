@@ -287,7 +287,26 @@ fn handle_message(
 
     GetCurrentState(reply_to) -> {
       let events = context.current_state(context: state.context)
-      let payload = protocol.server_events_to_json_string(events)
+      // Include in-flight turn state so reconnecting clients see the
+      // thinking indicator and active tool calls.
+      let turn_events = case state.llm_in_flight {
+        True -> {
+          let tool_events =
+            dict.to_list(state.pending_effects)
+            |> list.map(fn(entry) {
+              let #(call_id, cont) = entry
+              protocol.ToolCallStarted(
+                name: cont.tool_name,
+                args_json: "",
+                call_id: call_id,
+              )
+            })
+          [protocol.TurnStarted, ..tool_events]
+        }
+        False -> []
+      }
+      let payload =
+        protocol.server_events_to_json_string(list.append(events, turn_events))
       process.send(reply_to, payload)
       actor.continue(state)
     }
