@@ -148,7 +148,9 @@ fn index_html() -> String {
     .chat-log { flex: 1; overflow-y: auto; padding: 16px; }
     .msg { margin-bottom: 16px; }
     .msg-role { font-size: 11px; font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .msg-user, .msg-system { text-align: right; }
     .msg-user .msg-role { color: #89b4fa; }
+    .msg-system .msg-role { color: #94e2d5; }
     .msg-assistant .msg-role { color: #cba6f7; }
     .msg-content { font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
     .msg-content p { margin-bottom: 8px; }

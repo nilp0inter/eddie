@@ -9,8 +9,9 @@ Reactive OTP actor that owns the agent state and manages the LLM turn loop. The 
 - **`AgentConfig(agent_id, llm_config, system_prompt, extra_widgets, on_turn_complete)`** — configuration passed at start. `agent_id` identifies the agent within the tree. `extra_widgets` is a list of pre-built `WidgetHandle`s injected by `AgentTree` (e.g. mailbox, subagent_manager) — this avoids import cycles between agent.gleam and the widget modules. `on_turn_complete` is an optional callback `fn(String) -> Nil` invoked after each successful turn — child agents use this to auto-send their text output as mail to the parent (see agent_tree below)
 - **`AgentConfigOverride(model, api_base, system_prompt)`** — partial overrides for child agents (all fields `Option`). API key is always inherited
 - **`merge_config(parent, child_id, override)`** — produces a child `AgentConfig` from a parent config, a child ID, and an override (None fields inherit from parent)
-- **`AgentMessage`** — opaque message type with eleven variants:
+- **`AgentMessage`** — opaque message type with twelve variants:
   - `UserMessage(text, reply_to)` — user message with optional reply Subject
+  - `SystemMessage(text, from)` — system-level message (e.g. mail from a subagent), carries the sender's label for UI display
   - `GetState(reply_to)` — return current Context for inspection
   - `GetCurrentState(reply_to)` — return current widget state as a JSON-encoded `ServerEvent` list
   - `Subscribe(subscriber)` / `Unsubscribe(subscriber)` — register/unregister for state update notifications
@@ -22,14 +23,15 @@ Reactive OTP actor that owns the agent state and manages the LLM turn loop. The 
 - **`start(config)`** — creates a Context with default widgets, starts the actor, sends `SetSelf`, returns `Result(Subject(AgentMessage), StartError)`
 - **`start_with_send_fn(config, send_fn)`** — same but with an injectable HTTP sender for testing
 - **`run_turn(subject, text, timeout)`** — convenience wrapper: sends `UserMessage` with a reply Subject, blocks the caller via `process.call` (the agent processes asynchronously)
-- **`send_message(subject, text)`** — fire-and-forget, no reply
+- **`send_message(subject, text)`** — fire-and-forget user message, no reply
+- **`send_system_message(subject, text, from)`** — fire-and-forget system message with sender label, no reply
 - **`get_current_state(subject, timeout)`** — returns the current widget state as a JSON-encoded `ServerEvent` list (used to populate the frontend on initial WebSocket connection)
 
 **Reactive turn internals:**
 
 The agent reacts to messages based on its current data rather than following a synchronous loop. The turn lifecycle is capped at 25 iterations:
 
-1. `UserMessage` arrives — if idle, add to context, broadcast events, call `start_llm_call`; if busy, queue in `pending_user_messages`
+1. `UserMessage` or `SystemMessage` arrives — if idle, add to context (as `UserPart` or `SystemPart` respectively), broadcast events, call `start_llm_call`; if busy, queue in `pending_messages`
 2. `start_llm_call` — compose messages and tools from Context, build HTTP request via `llm.build_request`, spawn a process to call `send_fn`, set `llm_in_flight = True`
 3. `LlmResponse` arrives — parse response, record token usage, add to context, notify subscribers
 4. If tool calls: dispatch each through `context.handle_tool_call` — completed tools are collected as `ToolReturnPart`s immediately; pending effects (`ToolEffectPending`) are spawned as async processes with resume continuations stored in `pending_effects`
@@ -39,7 +41,7 @@ The agent reacts to messages based on its current data rather than following a s
 **Agent state bookkeeping:**
 
 - `llm_in_flight: Bool` — whether an LLM HTTP request is in flight
-- `pending_user_messages: List(#(String, Option(Subject(TurnResult))))` — queued user messages with optional reply Subjects
+- `pending_messages: List(PendingMessage)` — queued messages: `PendingUser(text, reply_to)` for user messages with optional reply Subjects, `PendingSystem(text, from)` for system messages with sender label
 - `pending_effects: Dict(String, EffectContinuation)` — in-flight tool effects keyed by call ID, each holding tool metadata, a `resume` closure, and a type-erased `to_msg` function
 - `collected_tool_parts: List(MessagePart)` — tool results collected during a dispatch round, recorded as a single message when all effects complete
 - `current_reply_to: Option(Subject(TurnResult))` — the reply Subject for the current turn's caller
@@ -126,9 +128,9 @@ Two-page Lustre application (`frontend/src/eddie_frontend.gleam`) with a landing
 
 **Conversation page view:**
 
-- **Top bar:** back button, "Eddie" title, agent ID, connection status
+- **Top bar:** back button, agent label (looked up from the tree, defaults to "Eddie" for root agents), agent ID, connection status
 - **Sidebar panels:** Goal, Tasks, Files, Tokens, Subagents (child agents with status icons), Mailbox (outbox)
-- **Chat view:** user messages, assistant responses with tool call badges, collapsible tool results, thinking indicator
+- **Chat view:** user messages (right-aligned), system messages from subagents (right-aligned, showing the sender's label), assistant responses with tool call badges (using the current agent's label), collapsible tool results, thinking indicator
 - **Input bar:** text input and send button, disabled when agent WS is not connected or when viewing a subagent (placeholder reads "This is a subagent, only its parent can send messages to it.")
 
 - **JS FFI:** `setTimeout`, `scrollToBottom`
@@ -163,14 +165,14 @@ OTP actor that manages a forest of rose-tree agent hierarchies. Each agent in th
 - **`set_broker(tree, broker)`** — injects the mailbox broker Subject (called once at startup)
 - **`SpawnError`** — `AgentAlreadyExists(id)` | `ParentNotFound(id)` | `AgentStartFailed(StartError)`
 
-Agents are stored as `Dict(String, AgentEntry)` where `AgentEntry` holds `subject`, `label`, `parent_id`, `child_ids`, and `status`. The tree builds extra widgets (subagent_manager, mailbox) via closures at spawn time to avoid import cycles (see [trade-off card](../decisions/tradeoffs/14-closure-based-widget-injection.md)). For child agents, the tree also wires the `on_turn_complete` callback to call `mailbox_broker.send_mail` from the child to the parent — this means every text output from a subagent is automatically delivered as mail to its parent without the LLM needing to call a tool. After spawning each agent, the tree starts a mail forwarder process that subscribes to the broker and converts incoming mail into user messages (see Mail forwarder section under widgets). The tree does not use OTP supervision — each agent is a standalone actor. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
+Agents are stored as `Dict(String, AgentEntry)` where `AgentEntry` holds `subject`, `label`, `parent_id`, `child_ids`, and `status`. The tree builds extra widgets (subagent_manager, mailbox) via closures at spawn time to avoid import cycles (see [trade-off card](../decisions/tradeoffs/14-closure-based-widget-injection.md)). For child agents, the tree also wires the `on_turn_complete` callback to call `mailbox_broker.send_mail` from the child to the parent, passing the child's label as `from_label` — this means every text output from a subagent is automatically delivered as mail to its parent without the LLM needing to call a tool. After spawning each agent, the tree starts a mail forwarder process that subscribes to the broker and converts incoming mail into system messages (see Mail forwarder section under widgets). The tree does not use OTP supervision — each agent is a standalone actor. There is no automatic restart or health monitoring (see [technical debt](../decisions/tech-debt.md)).
 
 ### `eddie/mailbox_broker`
 
 Central OTP actor for routing free-form text messages between agents. All agents share a single broker instance.
 
 - **State:** `mailboxes` (agent_id → inbox), `outboxes` (agent_id → sent), `subscribers` (agent_id → notification subscribers), `next_id` counter
-- **`send_mail(broker, from, to, content)`** — creates a `MailMessage` with unique ID and timestamp, appends to recipient's inbox and sender's outbox, notifies subscribers
+- **`send_mail(broker, from, from_label, to, content)`** — creates a `MailMessage` with unique ID, timestamp, and human-readable sender label, appends to recipient's inbox and sender's outbox, notifies subscribers
 - **`read_mail(broker, agent_id)`** — returns all inbox messages in chronological order
 - **`read_unread(broker, agent_id)`** — returns only unread messages
 - **`mark_read(broker, agent_id, message_id)`** — marks a message as read
@@ -204,7 +206,7 @@ Task-partitioned conversation history with memory management. The most complex w
 
 - `TaskStatus` — `Pending` | `InProgress` | `Done`
 - `Task(id, description, status, memories, ui_expanded)` — memories stored as reversed list (prepend during update, reverse when viewing)
-- `LogItem` — `UserMessageItem` | `ResponseItem` | `ToolResultsItem`, each carrying an `owning_task_id`
+- `LogItem` — `UserMessageItem` | `SystemMessageItem(text, from, owning_task_id)` | `ResponseItem` | `ToolResultsItem`, each carrying an `owning_task_id`. `SystemMessageItem` also carries a `from` label identifying the sender (e.g. a subagent's name)
 - `ConversationLogModel` — `log`, `tasks` dict, `task_order`, `next_id`, `active_task_id`, `picks_for_next_request` set
 
 **Messages (14 variants):**
@@ -222,6 +224,7 @@ Task-partitioned conversation history with memory management. The most complex w
 | `ToggleTaskExpanded` | UI | Visual toggle (no effect on LLM view) |
 | `UpdateTaskStatus` | UI | Checkbox-driven transitions (delegates to Start/Close logic) |
 | `UserMessageReceived` | Internal | Sent via `send()` to log user input |
+| `SystemMessageReceived` | Internal | Sent via `send()` to log system messages (e.g. subagent mail) |
 | `ResponseReceived` | Internal | Sent via `send()` to log LLM response |
 | `ToolResultsReceived` | Internal | Sent via `send()` to log tool results |
 | `ConsumePicks` | Internal | Clear picks after a request/response round-trip |
@@ -253,7 +256,7 @@ Log items are walked in chronological order, grouped by consecutive `owning_task
 
 An "Open tasks" block listing pending and in-progress tasks is appended at the end.
 
-**`view_state`** produces the full state for each task — `TaskCreated` followed by `TaskStatusChanged` (if not Pending) and `TaskMemoryAdded` events (one per memory) — plus `ConversationAppended` events for each log item (as `LogItemSnapshot` variants: `UserMessageSnapshot`, `ResponseSnapshot`, `ToolResultsSnapshot`). Task events and log events are exposed as separate functions (`typed_view_task_state` and `typed_view_log_state`) so the Context can split them into independent state entries — this prevents task state changes from breaking the prefix detection on the append-only conversation log in `changed_state`. The frontend handles `TaskCreated` as an upsert (reset if exists, create if new) to support full state re-sends from the diff mechanism.
+**`view_state`** produces the full state for each task — `TaskCreated` followed by `TaskStatusChanged` (if not Pending) and `TaskMemoryAdded` events (one per memory) — plus `ConversationAppended` events for each log item (as `LogItemSnapshot` variants: `UserMessageSnapshot`, `SystemMessageSnapshot(text, from, owning_task_id)`, `ResponseSnapshot`, `ToolResultsSnapshot`). Task events and log events are exposed as separate functions (`typed_view_task_state` and `typed_view_log_state`) so the Context can split them into independent state entries — this prevents task state changes from breaking the prefix detection on the append-only conversation log in `changed_state`. The frontend handles `TaskCreated` as an upsert (reset if exists, create if new) to support full state re-sends from the diff mechanism.
 
 **Factory:** `create()` — returns a `WidgetHandle` with an empty model. For Context's use, `init()` returns a typed `ConversationLog` opaque type with direct dispatch, protocol checking, and owning task ID access (see [trade-off card](../decisions/tradeoffs/04-typed-conversation-log-in-context.md)).
 
@@ -321,9 +324,9 @@ All broker communication uses `CmdEffect` — the `perform` closure calls `mailb
 
 A lightweight per-agent process spawned by `agent_tree` alongside each agent. It bridges the type gap between `Subject(MailMessage)` (broker notification) and `Subject(AgentMessage)` (agent message queue).
 
-**How it works:** The forwarder creates a `Subject(MailMessage)`, subscribes it to the broker via `subscribe_mailbox`, and loops forever with `process.receive_forever`. When mail arrives, it calls `agent.send_message` with `"[System: New mail from {sender}] {content}"`, which injects the full message as a user message and triggers a new turn.
+**How it works:** The forwarder creates a `Subject(MailMessage)`, subscribes it to the broker via `subscribe_mailbox`, and loops forever with `process.receive_forever`. When mail arrives, it calls `agent.send_system_message` with the mail content and the sender's `from_label` (human-readable name). This injects the message as an OpenAI system message (via `SystemPart`) rather than a user message, correctly representing the message role to the LLM. The frontend displays the sender's label as the message role header.
 
-**Key constraint:** Because `send_message` queues via `pending_user_messages`, the agent only processes incoming mail after its current turn ends. This is why the subagent_manager's prompts instruct the parent to end its turn after spawning — if the parent keeps calling tools, mail delivery is blocked until the turn completes.
+**Key constraint:** Because `send_system_message` queues via `pending_messages`, the agent only processes incoming mail after its current turn ends. This is why the subagent_manager's prompts instruct the parent to end its turn after spawning — if the parent keeps calling tools, mail delivery is blocked until the turn completes.
 
 ## Structured Output (Phase 5)
 
@@ -363,7 +366,7 @@ The root compositor — the glue between widgets and the agent loop. Holds a sys
 - **`new(system_prompt, children, conversation_log)`** — builds the context and scans all widgets to populate `tool_owners`
 - **`view_messages`** — composes messages from all widgets in order: system prompt → children → conversation log
 - **`view_tools`** — collects tool definitions from all widgets
-- **`add_user_message` / `add_response` / `add_tool_results`** — record items in the conversation log, tagged with the current owning task ID
+- **`add_user_message` / `add_system_message` / `add_response` / `add_tool_results`** — record items in the conversation log, tagged with the current owning task ID. `add_system_message` also takes a `from` label identifying the sender
 - **`consume_picks`** — clears one-shot task expansions after a request/response round-trip
 - **`handle_tool_call(context, tool_name, args, tool_call_id)`** — enforces the task protocol via `conversation_log.protocol_check`, then routes to the owning widget. Returns `ToolDispatchResult`: either `ToolCompleted(context, result)` or `ToolEffectPending(context, tool_name, tool_call_id, owner_id, perform, resume, to_msg)`
 - **`get_widget(context, owner_id)`** — retrieves a widget handle by owner ID. Returns `Result(WidgetHandle, Nil)`. Used by the agent to get the current handle when resuming async effects

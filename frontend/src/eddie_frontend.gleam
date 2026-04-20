@@ -782,7 +782,7 @@ fn view_conversation_top_bar(model: Model) -> Element(Msg) {
     html.button([attribute.class("back-btn"), event.on_click(NavigateToList)], [
       html.text("< Back"),
     ]),
-    html.h1([], [html.text("Eddie")]),
+    html.h1([], [html.text(current_agent_label(model))]),
     html.span([attribute.class("agent-id-label")], [html.text(agent_id)]),
     html.span([attribute.class("status " <> status_class)], [
       html.text(status_text),
@@ -1016,9 +1016,10 @@ fn view_mailbox_panel(state: AgentState) -> Element(Msg) {
 // ============================================================================
 
 fn view_chat(model: Model, state: AgentState) -> Element(Msg) {
+  let label = current_agent_label(model)
   html.div([attribute.class("chat")], [
     html.div([attribute.class("chat-log"), attribute.id("chat-log")], [
-      html.div([], list.map(state.log, view_log_item)),
+      html.div([], list.map(state.log, view_log_item(_, label))),
       view_active_tool_calls(state),
       view_thinking_indicator(state),
     ]),
@@ -1026,7 +1027,7 @@ fn view_chat(model: Model, state: AgentState) -> Element(Msg) {
   ])
 }
 
-fn view_log_item(item: LogItemSnapshot) -> Element(Msg) {
+fn view_log_item(item: LogItemSnapshot, agent_label: String) -> Element(Msg) {
   case item {
     protocol.UserMessageSnapshot(text:, ..) ->
       html.div([attribute.class("msg msg-user")], [
@@ -1058,7 +1059,7 @@ fn view_log_item(item: LogItemSnapshot) -> Element(Msg) {
           }
         })
       html.div([attribute.class("msg msg-assistant")], [
-        html.div([attribute.class("msg-role")], [html.text("Eddie")]),
+        html.div([attribute.class("msg-role")], [html.text(agent_label)]),
         html.div(
           [attribute.class("msg-content")],
           list.append(
@@ -1179,6 +1180,16 @@ fn on_enter_key(msg: Msg) -> Attribute(Msg) {
 // ============================================================================
 
 /// Check if the currently viewed agent is a subagent (has a parent).
+fn current_agent_label(model: Model) -> String {
+  case model.page {
+    AgentListPage -> "Eddie"
+    AgentConversationPage(agent_id) ->
+      find_agent_info(model.agent_tree, agent_id)
+      |> option.map(fn(info) { info.label })
+      |> option.unwrap("Eddie")
+  }
+}
+
 fn is_current_agent_subagent(model: Model) -> Bool {
   case model.page {
     AgentListPage -> False

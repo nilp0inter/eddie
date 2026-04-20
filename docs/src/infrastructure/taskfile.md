@@ -11,6 +11,7 @@ Run `task --list` to see all available tasks. Key commands:
 | `task format` | Auto-format all packages |
 | `task format:check` | Check formatting across all packages (CI) |
 | `task lint` | Format check + glinter |
+| `task clean` | Remove compiled artefacts (keeps package cache) |
 | `task docs:build` | Build documentation |
 | `task docs:serve` | Serve docs with live reload |
 
